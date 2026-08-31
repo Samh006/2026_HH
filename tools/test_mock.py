@@ -11,6 +11,7 @@ produce, including the truncated-upload case the mock is there to catch.
 """
 import base64
 import io
+import json
 import sys
 
 import requests
@@ -91,19 +92,57 @@ def main():
     text = r.json()["choices"][0]["message"]["content"]
     check("vision returns canned text", "Amoxicillin" in text, repr(text))
 
-    r = requests.post(f"{BASE}/api/v1/audio/speech", timeout=30, json={
-        "model": "openai/gpt-4o-mini-tts-2025-12-15",
-        "input": text, "voice": "alloy",
-        "response_format": "pcm", "speed": 1.0})
-    check("tts returns 200", r.status_code == 200)
-    check("tts returns raw bytes not JSON",
-          not r.content.lstrip().startswith(b"{"))
-    check("tts byte count is even (whole 16-bit samples)",
-          len(r.content) % 2 == 0, f"{len(r.content)} bytes")
-    check("tts content-length matches body",
-          int(r.headers.get("Content-Length", -1)) == len(r.content))
-    print(f"        -> {len(r.content)} bytes = "
-          f"{len(r.content) / 2 / 24000:.2f}s at 24k/16/mono")
+    print("\nspeech leg -- SSE audio (D14 shape)")
+    r = requests.post(f"{BASE}/api/v1/audio/speech", timeout=30,
+                      json={"model": "openai/gpt-audio-mini", "input": text})
+    check("/audio/speech returns 400 like the real API", r.status_code == 400,
+          r.text[:120])
+
+    body = {"model": "openai/gpt-audio-mini",
+            "modalities": ["text", "audio"],
+            "audio": {"voice": "alloy", "format": "pcm16"},
+            "messages": [{"role": "user", "content": text}]}
+    r = requests.post(f"{BASE}/api/v1/chat/completions", json=body, timeout=30)
+    check("audio without stream:true is refused", r.status_code == 400,
+          r.text[:120])
+
+    body["stream"] = True
+    r = requests.post(f"{BASE}/api/v1/chat/completions", json=body,
+                      timeout=60, stream=True)
+    check("streaming audio returns 200", r.status_code == 200)
+    check("content-type is text/event-stream",
+          "event-stream" in (r.headers.get("Content-Type") or ""))
+
+    pcm, chunks, odd_ends, transcript, saw_done = bytearray(), 0, 0, "", False
+    for line in r.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        raw = line[6:]
+        if raw.strip() == "[DONE]":
+            saw_done = True
+            break
+        ev = json.loads(raw)
+        for chd in ev.get("choices", []):
+            aud = (chd.get("delta") or {}).get("audio") or {}
+            if aud.get("transcript"):
+                transcript = aud["transcript"]
+            if aud.get("data"):
+                piece = base64.b64decode(aud["data"])
+                if len(piece) % 2:
+                    odd_ends += 1
+                pcm += piece
+                chunks += 1
+    check("received multiple audio chunks", chunks > 1, f"{chunks} chunks")
+    check("stream terminated with [DONE]", saw_done)
+    check("transcript delivered", bool(transcript), repr(transcript[:40]))
+    check("chunks end mid-sample (firmware needs a carry)",
+          odd_ends > 0, f"{odd_ends} of {chunks} ended on an odd byte")
+    check("reassembled PCM is a whole number of samples",
+          len(pcm) % 2 == 0, f"{len(pcm)} bytes")
+    check("reassembled PCM is a plausible length", len(pcm) > 20000,
+          f"{len(pcm)} bytes")
+    print(f"        -> {chunks} chunks, {len(pcm)} bytes = "
+          f"{len(pcm) / 2 / 24000:.2f}s at 24k/16/mono")
 
     print("\nmode routing")
     for prompt, want in [

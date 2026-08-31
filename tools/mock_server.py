@@ -9,20 +9,27 @@ OpenRouter during development. That keeps firmware work deterministic and free,
 and it is our demo-day fallback: if the venue Wi-Fi dies we point the device at
 a laptop and still demo. Keep this working all four weeks.
 
-Plain HTTP here is DELIBERATE (02-SOFTWARE.md section 3). Do not add TLS to the
-mock. The point is to prove the request/response loop first, so that when TLS
-breaks in week 2 we know it is TLS.
+Plain HTTP here is DELIBERATE (D10). Do not add TLS to the mock. The point is
+to prove the request/response loop first, so that when TLS breaks in week 2 we
+know it is TLS.
 
-Beyond the brief's 40 lines this adds three things firmware actually needs:
-  * the uploaded base64 is decoded and validated as a JPEG, which catches a
-    truncated or mis-padded streaming encoder immediately instead of at the
-    "why is the model describing nothing" stage;
-  * every received photo is saved to tools/captures/, which is where the eval
-    set's 20 real photos can come from;
-  * failure modes are triggerable on demand, so the state machine's error
-    paths can be tested without unplugging anything.
+IMPORTANT -- this mock now matches the REAL OpenRouter shape, which is not what
+the software brief described (see D14). Verified against the live API:
+
+  * There is no usable /audio/speech endpoint and no response_format: pcm.
+    This mock returns the real 400 for it, so firmware finds out immediately
+    rather than building against a fiction.
+  * Speech comes from openai/gpt-audio-mini on /chat/completions with
+    stream: true, modalities: ["text","audio"], audio: {voice, format}.
+    Audio arrives as base64 inside SSE `delta.audio.data` chunks.
+  * Audio output without stream: true is refused. This mock refuses it too.
+
+So firmware's audio path needs SSE line framing plus a streaming base64
+DECODER, and two carries: base64 quads (4 chars -> 3 bytes) and 16-bit sample
+alignment. The mock chunks on deliberately awkward boundaries to shake both out.
 """
 import base64
+import json
 import os
 import re
 import struct
@@ -33,13 +40,14 @@ from flask import Flask, Response, jsonify, request
 
 HOST, PORT = "0.0.0.0", 8080          # 0.0.0.0 -- the ESP32 must reach this
 VISION_DELAY_S = 2.5                  # imitate real latency -- DO NOT REMOVE
-TTS_DELAY_S = 1.0
+TTS_FIRST_BYTE_S = 1.6                # measured against the real API
+TTS_CHUNKS = 13                       # measured: 13 chunks for ~5 s of speech
 CAPTURE_DIR = "tools/captures"
 PCM_DIR = "tools/phrases_pcm16"
+SAMPLE_RATE = 24000
 
 app = Flask(__name__)
 
-# ---- canned replies, one per mode ---------------------------------------
 CANNED = {
     "read": ("Amoxicillin 500 milligrams. Take one capsule three times a day "
              "with food. Complete the full course."),
@@ -48,11 +56,13 @@ CANNED = {
     "summarise": ("This is a prescription label. Amoxicillin 500 milligrams, "
                   "three times a day with food."),
     "notext": "NOTEXT",
+    # D17: what a degraded image should look like coming back
+    "uncertain": ("Metformin 850 milligrams. Take 1 tablet twice daily with "
+                  "meals. Qty 60 UNCLEAR Exp 09/2026 UNCLEAR"),
 }
 
-# Failure modes firmware must handle. Flip at runtime:
-#   curl -X POST http://localhost:8080/mock/scenario -d scenario=notext
-SCENARIOS = ("ok", "notext", "http500", "timeout", "garbage", "empty")
+SCENARIOS = ("ok", "notext", "uncertain", "http500", "timeout", "garbage",
+             "empty")
 state = {"scenario": "ok", "presses": 0}
 
 
@@ -61,7 +71,6 @@ def log(msg):
 
 
 def classify(prompt):
-    """Infer the mode from the prompt so one mock serves all three."""
     p = (prompt or "").lower()
     if "transcribe" in p:
         return "read"
@@ -73,9 +82,7 @@ def classify(prompt):
 
 
 def find_parts(payload):
-    """Pull (prompt_text, image_data_url) out of an OpenAI-shaped body without
-    assuming a fixed part order -- the brief puts text first, but a firmware
-    bug that swaps them should produce a clear log line, not a KeyError."""
+    """(prompt_text, image_data_url) without assuming part order."""
     text, image = None, None
     for msg in payload.get("messages", []):
         content = msg.get("content")
@@ -91,7 +98,6 @@ def find_parts(payload):
 
 
 def jpeg_dims(raw):
-    """Width/height from the first SOFn marker, or None."""
     i = 2
     while i + 9 < len(raw):
         if raw[i] != 0xFF:
@@ -110,10 +116,9 @@ def jpeg_dims(raw):
 
 
 def check_jpeg(data_url):
-    """Decode the base64 and sanity-check the JPEG. This is the single most
-    useful thing the mock does: a streaming base64 encoder that drops the tail
-    or mis-pads is the likeliest firmware bug, and it is invisible from the
-    device end."""
+    """Decode and validate. The single most useful thing the mock does: a
+    streaming base64 encoder that drops its tail or mis-pads is the likeliest
+    firmware bug and is invisible from the device end."""
     if not data_url:
         return None, "no image part in request"
     m = re.match(r"^data:image/jpeg;base64,(.*)$", data_url, re.S)
@@ -146,11 +151,8 @@ def save_capture(raw):
 
 
 def load_pcm():
-    """Return 16-bit LE mono PCM bytes for the TTS reply. Prefers a converted
-    phrase; falls back to a 440 Hz tone so the mock still runs on a fresh
-    clone. NOTE: the brief's snippet used Python's `wave` module, which cannot
-    open the float32 WAVs in Messages/ -- run tools/wav_to_phrases.py first."""
-    for name in ("no_text.wav", "ready.wav"):
+    """16-bit LE mono PCM for the audio reply, or a 440 Hz tone as fallback."""
+    for name in ("no_internet.wav", "no_text.wav", "ready.wav"):
         path = os.path.join(PCM_DIR, name)
         if os.path.exists(path):
             data = open(path, "rb").read()
@@ -160,22 +162,95 @@ def load_pcm():
     import array
     import math
     a = array.array("h", (int(12000 * math.sin(2 * math.pi * 440 * i / 24000))
-                          for i in range(24000)))       # 1 s of 440 Hz
-    return a.tobytes(), "generated 440 Hz tone (no converted WAVs found)"
+                          for i in range(24000)))
+    return a.tobytes(), "generated 440 Hz tone (run wav_to_phrases.py)"
 
 
-# ---- vision -------------------------------------------------------------
+def sse(obj):
+    return f"data: {json.dumps(obj)}\n\n"
+
+
+def audio_stream(text, voice, fmt):
+    """SSE stream shaped like the real thing: a role delta, then audio deltas
+    carrying base64 PCM, then [DONE].
+
+    The chunk sizes are deliberately NOT multiples of 3 bytes, so each base64
+    payload ends mid-quad and each decoded chunk can end on an odd byte. That
+    is exactly what the real API does and it is what breaks a naive decoder:
+    firmware needs a base64 carry AND a 16-bit sample carry."""
+    pcm, src = load_pcm()
+    log(f"  audio source {src}, {len(pcm)} bytes")
+    yield sse({"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+    time.sleep(TTS_FIRST_BYTE_S)
+
+    # awkward sizes on purpose -- 3-byte-aligned chunks would hide the bug
+    step = max(1, len(pcm) // TTS_CHUNKS) + 1
+    sent = 0
+    for i in range(0, len(pcm), step):
+        chunk = pcm[i:i + step]
+        sent += 1
+        payload = {"choices": [{"index": 0, "delta": {"audio": {
+            "data": base64.b64encode(chunk).decode()}}}]}
+        if sent == 1:
+            payload["choices"][0]["delta"]["audio"]["transcript"] = text
+        yield sse(payload)
+        time.sleep(0.05)
+    log(f"  streamed {sent} audio chunks, {len(pcm)} bytes total "
+        f"({len(pcm) / 2 / SAMPLE_RATE:.2f}s @ {SAMPLE_RATE} Hz)")
+    yield sse({"choices": [{"index": 0, "delta": {},
+                            "finish_reason": "stop"}]})
+    yield "data: [DONE]\n\n"
+
+
 @app.post("/api/v1/chat/completions")
-def vision():
-    state["presses"] += 1
-    scenario = state["scenario"]
-    log(f"--- press #{state['presses']}  scenario={scenario}")
-
+def chat_completions():
     payload = request.get_json(force=True, silent=True)
     if payload is None:
         log("  ! body is not valid JSON")
         return jsonify({"error": {"message": "invalid JSON"}}), 400
 
+    modalities = payload.get("modalities") or []
+    wants_audio = "audio" in modalities
+
+    # ---- speech leg ----
+    if wants_audio:
+        text = ""
+        for msg in payload.get("messages", []):
+            c = msg.get("content")
+            if isinstance(c, str):
+                text = c
+        audio_cfg = payload.get("audio") or {}
+        log(f"  TTS request: model={payload.get('model')} "
+            f"voice={audio_cfg.get('voice')} format={audio_cfg.get('format')}")
+        log(f"  input: {text[:70]!r}")
+
+        # The real API refuses audio output without streaming. Mirror it.
+        if not payload.get("stream"):
+            log("  ! rejected: audio output requires stream: true")
+            return jsonify({"error": {
+                "message": "Audio output requires stream: true",
+                "code": 400}}), 400
+        if audio_cfg.get("format") not in ("pcm16", "wav"):
+            log(f"  ! format {audio_cfg.get('format')!r} -- want pcm16 "
+                "(the device has no decoder)")
+        if "UNCLEAR" in text or "[?]" in text:
+            log("  ! text still contains uncertainty markers. Strip them on "
+                "device and speak PHRASE_UNCERTAIN instead (D17).")
+        if text.strip().upper() == "NOTEXT":
+            log("  ! NOTEXT sent to TTS -- handle on device with "
+                "PHRASE_NO_TEXT; this costs money and sounds broken.")
+        if state["scenario"] == "http500":
+            return jsonify({"error": {"message": "mock failure"}}), 500
+        return Response(audio_stream(text, audio_cfg.get("voice"),
+                                     audio_cfg.get("format")),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no"})
+
+    # ---- vision leg ----
+    state["presses"] += 1
+    scenario = state["scenario"]
+    log(f"--- press #{state['presses']}  scenario={scenario}")
     prompt, image = find_parts(payload)
     mode = classify(prompt)
     log(f"  model={payload.get('model')} max_tokens={payload.get('max_tokens')}")
@@ -201,7 +276,8 @@ def vision():
         return Response('{"choices": [{"mess', mimetype="application/json")
 
     time.sleep(VISION_DELAY_S)
-    text = CANNED["notext"] if scenario == "notext" else CANNED[mode]
+    text = CANNED["notext"] if scenario == "notext" else CANNED[
+        "uncertain" if scenario == "uncertain" else mode]
     if scenario == "empty":
         text = ""
     log(f"  -> {text[:70]!r}")
@@ -210,43 +286,22 @@ def vision():
         "model": payload.get("model", "mock"),
         "choices": [{"index": 0, "finish_reason": "stop",
                      "message": {"role": "assistant", "content": text}}],
-        "usage": {"prompt_tokens": 1200,
-                  "completion_tokens": len(text) // 4,
+        "usage": {"prompt_tokens": 1200, "completion_tokens": len(text) // 4,
                   "total_tokens": 1200 + len(text) // 4},
     })
 
 
-# ---- text to speech -----------------------------------------------------
 @app.post("/api/v1/audio/speech")
-def speech():
-    scenario = state["scenario"]
-    payload = request.get_json(force=True, silent=True) or {}
-    text = payload.get("input", "")
-    log(f"  TTS in: {text[:60]!r} voice={payload.get('voice')} "
-        f"format={payload.get('response_format')}")
-
-    if payload.get("response_format") != "pcm":
-        log(f"  ! response_format is {payload.get('response_format')!r}, "
-            "not 'pcm' -- the device has no MP3 decoder")
-    if text.strip().upper() == "NOTEXT":
-        log("  ! NOTEXT was sent to TTS. Handle it on-device with the "
-            "pre-recorded phrase instead -- this costs money and sounds like "
-            "a malfunction. (02-SOFTWARE.md section 5)")
-    if not text.strip():
-        log("  ! empty input sent to TTS")
-
-    if scenario == "http500":
-        return jsonify({"error": {"message": "mock failure"}}), 500
-
-    time.sleep(TTS_DELAY_S)
-    pcm, src = load_pcm()
-    secs = len(pcm) / 2 / 24000
-    log(f"  -> {len(pcm)} bytes PCM ({secs:.2f}s @ 24k/16/mono) from {src}")
-    return Response(pcm, mimetype="audio/pcm",
-                    headers={"Content-Length": str(len(pcm))})
+def speech_gone():
+    """The real OpenRouter returns exactly this. Kept so that firmware written
+    against the old brief fails loudly here instead of on demo day."""
+    log("  ! /audio/speech called -- this endpoint does not work on "
+        "OpenRouter (D14). Use /chat/completions with modalities+audio+stream.")
+    return jsonify({"error": {
+        "message": f"Model {(request.get_json(silent=True) or {}).get('model')} "
+                   "does not exist", "code": 400}}), 400
 
 
-# ---- control surface ----------------------------------------------------
 @app.post("/mock/scenario")
 def set_scenario():
     want = (request.form.get("scenario")
@@ -265,10 +320,13 @@ def status():
 
 if __name__ == "__main__":
     _, source = load_pcm()
-    print("mock_server.py -- fake OpenRouter. Plain HTTP is deliberate.")
+    print("mock_server.py -- fake OpenRouter, matching the REAL API shape (D14)")
     print(f"audio source : {source}")
     print(f"scenarios    : {', '.join(SCENARIOS)}  (POST /mock/scenario)")
     print(f"captures     : {CAPTURE_DIR}/")
+    print("speech       : /chat/completions + modalities:[text,audio] + "
+          "stream:true  -> SSE base64")
+    print("             : /audio/speech returns 400, exactly like the real API")
     print(f"listening on : http://{HOST}:{PORT}/api/v1")
     print("               ^ point firmware at the LAN IP, not 127.0.0.1\n")
     app.run(host=HOST, port=PORT, threaded=True)

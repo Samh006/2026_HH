@@ -76,12 +76,33 @@ templated, 17 still to shoot. Real objects, not printouts: medicine bottles,
 glossy menus, curved packaging, low-contrast bills, handwriting, a timetable.
 Run on every prompt change; if the score doesn't move, don't ship the change.
 
-### 6. Phrase generation — blocked, don't run yet
+### 6. Phrase generation — installed and working, but a decision is pending
+
+`pocket-tts` 3.0.2 is installed. Two voice paths:
 
 ```
+# catalog voice -- works now, no gating
+python tools/make_phrases.py --voice alba --out-dir /tmp/try --only reading
+
+# clone the cloud voice -- needs the GATED kyutai/pocket-tts weights
 python tools/make_phrases.py --voice-sample tools/cloud_voice_sample.wav
 ```
 
-Needs `pip install pocket-tts`, and needs the cloud TTS voice chosen first
-(D13) — the point is cloning the voice we actually ship. Generating before the
-voice is picked means doing it twice. 6 of 9 phrases are still unrecorded.
+**Voice cloning is gated.** `kyutai/pocket-tts` needs its terms accepted on
+Hugging Face plus a local login; without that it silently falls back to
+`pocket-tts-without-voice-cloning`, which has 26 fixed voices and no cloning.
+That puts D6 ("one voice throughout") in question — see the open item in
+`docs/decisions.md`. The script explains both routes if you hit it.
+
+Two things to know:
+
+- **Clone samples must be int16.** pocket-tts reads voice prompts through
+  Python's `wave` module, which cannot open the float32 files in `Messages/`.
+  Use `tools/phrases_pcm16/` instead (same D7 bug, third appearance).
+- **Always `--out-dir` somewhere scratch first.** Without it, generation writes
+  straight into `Messages/` in whatever voice you passed. Listen before
+  committing to a voice; `phrases.h` is only regenerated when writing to
+  `Messages/`.
+
+Generation is stochastic — the same phrase re-renders a little longer or
+shorter each run. 6 of 9 phrases are still unrecorded.

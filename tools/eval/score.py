@@ -27,7 +27,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests                                            # noqa: E402
-from reference_pipeline import PROMPTS, clean, vision       # noqa: E402
+from reference_pipeline import (PROMPTS, clean, load_key,   # noqa: E402
+                                vision)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -69,9 +70,9 @@ def main():
     ap.add_argument("--only", help="run a single item id")
     args = ap.parse_args()
 
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    key, key_src = load_key()
     if not key and "openrouter.ai" in args.base_url:
-        sys.exit("OPENROUTER_API_KEY not set, and --base-url is the real API.")
+        sys.exit(f"No API key ({key_src}), and --base-url is the real API.")
 
     spec = json.load(open(args.expected, encoding="utf-8"))
     items = [i for i in spec["items"]

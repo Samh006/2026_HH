@@ -21,6 +21,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -129,6 +130,31 @@ def auth(key):
     return h
 
 
+CONFIG_H = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "firmware", "src", "config.h")
+
+
+def load_key():
+    """OPENROUTER_API_KEY if set, else read OR_API_KEY out of config.h.
+
+    The fallback matters for two reasons: config.h is gitignored and already
+    holds the key for the firmware, so there is one place to update rather than
+    two; and a freshly-set Windows user environment variable is invisible to
+    processes that were already running, which otherwise looks like a missing
+    key. Never print the return value."""
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key, "environment"
+    try:
+        with open(CONFIG_H, encoding="utf-8", errors="replace") as f:
+            m = re.search(r'#define\s+OR_API_KEY\s+"([^"]*)"', f.read())
+    except OSError:
+        return "", "not found"
+    if not m or "REPLACE-ME" in m.group(1):
+        return "", "config.h placeholder"
+    return m.group(1).strip(), "firmware/src/config.h"
+
+
 def wrap_wav(pcm, rate):
     """Wrap raw 16-bit mono PCM in a WAV header so it is playable."""
     n = len(pcm) - (len(pcm) % 2)
@@ -167,14 +193,17 @@ def main():
                     help="skip TTS (free -- use this while tuning prompts)")
     args = ap.parse_args()
 
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    key, key_src = load_key()
     is_mock = "openrouter.ai" not in args.base_url
     if not key and not is_mock:
-        sys.exit("OPENROUTER_API_KEY is not set. Either export it, or point "
-                 "--base-url at the mock server.")
+        sys.exit(f"No API key ({key_src}). Set OPENROUTER_API_KEY, or fill in "
+                 "OR_API_KEY in firmware/src/config.h, or point --base-url at "
+                 "the mock server.")
 
     print(f"\n  backend     : {args.base_url}"
           f"{'  (mock -- plain HTTP)' if is_mock else '  (real, TLS)'}")
+    if not is_mock:
+        print(f"  key         : {len(key)} chars, from {key_src}")
     print(f"  mode        : {args.mode}")
 
     session = requests.Session()

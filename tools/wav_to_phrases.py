@@ -33,6 +33,7 @@ NAME_MAP = {
     "connecting":  "CONNECTING",
     "batt_low":    "BATT_LOW",
     "error":       "ERROR",
+    "uncertain":   "UNCERTAIN",
     "repeating":   "REPEATING",
 }
 
