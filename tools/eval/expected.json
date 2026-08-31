@@ -1,0 +1,51 @@
+{
+  "_readme": [
+    "Ground truth for the eval set. 20 real objects, not printouts of clean",
+    "paragraphs: medicine bottles, glossy laminated menus, curved packaging,",
+    "low-contrast utility bills, handwriting, a bus timetable.",
+    "",
+    "Photos go in tools/eval/images/ with the filename below. The mock server",
+    "saves every photo the device uploads to tools/captures/, so the easiest",
+    "way to build this set is to shoot it with the actual device.",
+    "",
+    "'numbers' is the field that matters. Doses, expiry dates, bus numbers and",
+    "dollar amounts are the failure case people actually care about, and they",
+    "are scored as exact match. 'must_contain' is scored case-insensitively on",
+    "substrings. 'useful_spoken' is the human judgement, filled in by hand.",
+    "",
+    "Run: python tools/eval/score.py --base-url <mock or real>"
+  ],
+  "items": [
+    {
+      "id": "01-amoxicillin-bottle",
+      "file": "01-amoxicillin-bottle.jpg",
+      "mode": "read",
+      "notes": "curved white pharmacy bottle, small print",
+      "numbers": ["500", "3"],
+      "must_contain": ["amoxicillin", "capsule"],
+      "expected_text": "FILL ME IN: the text a sighted person would read aloud",
+      "useful_spoken": null
+    },
+    {
+      "id": "02-gas-bill",
+      "file": "02-gas-bill.jpg",
+      "mode": "summarise",
+      "notes": "low-contrast utility bill, the D-mode example from the plan",
+      "numbers": ["184", "12"],
+      "must_contain": ["gas", "due"],
+      "expected_text": "FILL ME IN",
+      "useful_spoken": null
+    },
+    {
+      "id": "03-bus-timetable",
+      "file": "03-bus-timetable.jpg",
+      "mode": "read",
+      "notes": "dense columns -- tests reading order badly",
+      "numbers": [],
+      "must_contain": [],
+      "expected_text": "FILL ME IN",
+      "useful_spoken": null
+    }
+  ],
+  "_todo": "17 more items. Shoot them this week -- longest lead time in the software track, and it needs a human with a camera and real objects."
+}
