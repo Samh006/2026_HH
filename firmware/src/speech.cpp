@@ -239,11 +239,30 @@ SpeechStats speech_say(const char *text) {
         // A 24 KB line would need a JSON document of comparable size, doubling
         // peak memory in the one place we cannot afford it -- and the shape is
         // fixed and known.
-        const char *key = strstr(payload, "\"data\":\"");
+        // Tolerate whitespace around the colon. Compact JSON gives
+        // "data":"..." but a pretty-printer gives "data": "..." -- and a
+        // literal strstr for one form silently skips every audio delta of the
+        // other, which presents as "13 chunks sent, 0 received" with no error
+        // anywhere. Do not assume the server's separator style.
+        const char *key = strstr(payload, "\"data\"");
         if (key == nullptr) {
             continue;                          // role delta, transcript, usage
         }
-        const char *b64 = key + 8;
+        const char *p = key + 6;               // just past the closing quote
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p != ':') {
+            continue;
+        }
+        p++;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p != '"') {
+            continue;                          // null, or not a string
+        }
+        const char *b64 = p + 1;
         const char *close = strchr(b64, '"');
         if (close == nullptr) {
             Serial.println("[tts ] audio delta truncated -- line cap too small?");

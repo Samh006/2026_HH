@@ -152,13 +152,24 @@ def save_capture(raw):
 
 def load_pcm():
     """16-bit LE mono PCM for the audio reply, or a 440 Hz tone as fallback."""
-    for name in ("no_internet.wav", "no_text.wav", "ready.wav"):
-        path = os.path.join(PCM_DIR, name)
+    # mock_tts_sample.wav FIRST, and this ordering matters. The fallbacks are
+    # system phrases, so with no_internet.wav the device announces "No internet
+    # connection" while perfectly connected -- and since this mock is the
+    # DEMO-DAY FALLBACK (02-SOFTWARE.md gotcha 7), that means demoing a
+    # medicine label to judges with the device claiming it is offline.
+    # mock_tts_sample.wav speaks the same text the vision endpoint returns, so
+    # the mock behaves like the real API end to end.
+    # Regenerate with pocket-tts if the canned text changes.
+    for name, base in (("mock_tts_sample.wav", "tools"),
+                       ("no_internet.wav", PCM_DIR),
+                       ("no_text.wav", PCM_DIR),
+                       ("ready.wav", PCM_DIR)):
+        path = os.path.join(base, name)
         if os.path.exists(path):
             data = open(path, "rb").read()
             idx = data.find(b"data")
             if idx > 0:
-                return data[idx + 8:], f"{PCM_DIR}/{name}"
+                return data[idx + 8:], path
     import array
     import math
     a = array.array("h", (int(12000 * math.sin(2 * math.pi * 440 * i / 24000))
@@ -167,7 +178,13 @@ def load_pcm():
 
 
 def sse(obj):
-    return f"data: {json.dumps(obj)}\n\n"
+    # COMPACT separators, matching the real API on the wire. The default
+    # json.dumps emits '"data": "..."' with a space after the colon; a
+    # firmware parser doing a literal strstr for '"data":"' then skips
+    # every audio delta -- 13 chunks sent, 0 received, and no error anywhere
+    # to point at it. A mock that differs from the real API by one byte is
+    # worse than no mock.
+    return f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
 
 
 def audio_stream(text, voice, fmt):
