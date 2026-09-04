@@ -253,3 +253,106 @@ curl http://localhost:8080/mock/status
 
 **Companions:** `00-TEAM-PLAN.md` · `01-HARDWARE.md` · `02-SOFTWARE.md` ·
 `docs/decisions.md` · `docs/measurements.md`
+
+---
+
+# What actually happened — 4 Sep, end of day
+
+Written at the end of the day, so plan and outcome sit in one file. Decisions
+went to `docs/decisions.md` (D20-D24); measured numbers to
+`docs/measurements.md`.
+
+## Achieved
+
+**The week-1 milestone, on day 1: a button press produces speech from the
+speaker.** `02-SOFTWARE.md` section 10 set that as the week-1 target.
+
+Proven on real hardware, not just compiled:
+
+| | |
+|---|---|
+| Boot, 8 MB PSRAM, stable heap across every phase | ✅ |
+| Two buttons, four distinct events, no double-fires | ✅ |
+| Wi-Fi association and reconnect | ✅ |
+| Shutter earcon (synthesised, not recorded) | ✅ |
+| Phrase playback from flash via I2S | ✅ |
+| Audio over the network: HTTP -> SSE -> base64 -> sample carry -> I2S | ✅ |
+| State machine including failure paths | ✅ |
+| Camera capture + vision call | ❌ other SWE, still stubbed |
+
+The audio result is exact: **45149 samples received of 45149 sent**, zero
+bytes lost, and no audible clicking. That is the one-byte sample carry across
+chunk boundaries proven correct rather than merely sounding acceptable --
+`02-SOFTWARE.md` section 11.4 warns it otherwise costs an evening.
+
+Measured latency, press to first spoken word: **~4.5 s** (120 ms stub capture
++ 2.5 s simulated vision + 1.93 s to first audio). Target is under 6 s, so
+about 1.5 s of headroom, which real camera capture and upload will eat into.
+
+## Firmware written today
+
+`buttons.cpp/.h`, `phrase.cpp/.h`, `pipeline.h`, `pipeline_stub.cpp`,
+`camera_tuning.h`, and `main.cpp` (the state machine). RAM 15.3%, flash 30.5%.
+
+The camera/vision half is declared as **weak symbols** in
+`pipeline_stub.cpp`, so when the other SWE's real implementations link, theirs
+win automatically -- no flag, no `#ifdef`, no merge conflict in `main.cpp`.
+Delete the stub file once both are real. The boot banner prints
+`*** STUBBED ***` so nobody demos canned text believing it came from a photo.
+
+## Five bugs found and fixed
+
+Roughly in order of how long each cost:
+
+1. **Wrong board.** The team had moved to an ESP32-S3-WROOM; everything had
+   been compiling as `esp32dev`. Different architecture, and the entire pin
+   map in `01-HARDWARE.md` is wrong for it -- GPIO 13/15 are camera pins now.
+   (D20)
+2. **Wrong flash mode.** `qio_*` hangs the second-stage bootloader *before it
+   prints a single character*. esptool flashes and verifies fine, then total
+   silence and no LED -- indistinguishable from a dead board. Only `dio_opi`
+   works. The tell is a ROM log that reaches `entry 0x...` and stops. (D21)
+3. **Avast.** Two separate failures from one product: TLS interception broke
+   PlatformIO's toolchain downloads, and its firewall silently blocked inbound
+   TCP to the mock. Windows Firewall rules looked perfect and were irrelevant,
+   because Avast registers itself as the system firewall product.
+4. **A one-space JSON mismatch** muted the entire audio path with no error
+   anywhere. (D23)
+5. **The mock announcing "No internet connection"** while connected, because
+   its placeholder audio was a system phrase. A live demo hazard. (D24)
+
+The lesson worth keeping from #2 and #3: **the ROM boot log on the UART port
+is the only place a boot failure is visible.** The OTG port shows nothing,
+because USB-Serial-JTAG stays enumerated whether or not the app boots -- so a
+live COM port proves nothing. Debug on the CH340 port. (D22)
+
+## Still open, most urgent first
+
+1. 🔴 **The voice-cloning decision.** Oldest open item, now blocking 7 of 10
+   phrases -- including D17's uncertainty warning, which is the
+   safety-relevant one. Every failure path is currently silent because of it.
+2. 🔴 **Turn Avast back on, and fix it properly** -- set the hotspot network
+   to Private/Friend in Avast's firewall, or allow `python.exe` inbound.
+   Left off at end of day. If it re-arms as-is the mock breaks again, and it
+   breaks for whoever runs the demo fallback.
+3. 🔴 **Eval photos: 0 of 10.** Longest lead time, needs a human with a
+   camera and real objects, and needs the lens refocused first (D18).
+4. **`camera.cpp` / `vision.cpp`** -- unwritten. `pipeline.h` is the contract.
+5. **Lens refocus and the two diffused LEDs** -- D18 makes these the primary
+   accuracy mechanism, not polish. Also the fix for the reported motion blur.
+6. **Hardware answers to record in `hardware/wiring.md`:** did the ES7148 need
+   MCLK on SCK, and which channel is the speaker on? Audio works with
+   `mclk=-1` and `mono(left)`, which implies "no" and "left", but it was not
+   confirmed explicitly.
+7. **The 1 Hz waiting tick** -- there is a silent ~4.5 s gap. Needs the
+   network work on its own task; best done once `vision_read` is real so it
+   wraps both calls.
+8. **Offline Repeat** -- currently re-calls TTS. Caching PCM in PSRAM is
+   clearly viable with 8 MB free.
+
+## Parked
+
+The self-hosted server idea is recorded as an open question in
+`docs/decisions.md` -- **not decided, and nothing built for it.** It was
+raised late, by someone not on site, at the end of a long day. Revisit when
+the team is together.

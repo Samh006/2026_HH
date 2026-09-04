@@ -24,6 +24,8 @@
 // Mock: plain HTTP is deliberate. Do not add TLS here — the mock exists so
 // the request/response loop is proven before TLS enters the picture.
 // Set this to the laptop's LAN IP; the ESP32 cannot reach 127.0.0.1.
+// PLACEHOLDER -- put YOUR laptop's LAN IP here. The mock prints it in its
+// startup banner. Not 127.0.0.1: the ESP32 cannot reach that.
 #define MOCK_BASE_URL   "http://192.168.1.100:8080/api/v1"
 
 // Real API. HTTPS is not optional — OpenRouter serves no http:// endpoint.
@@ -60,14 +62,24 @@
 #define TTS_VOICE       "alloy"        // must match the phrase-bank voice
 #define TTS_AUDIO_FORMAT "pcm16"
 
+// ── Audio / pins ────────────────────────────────────────────────────────
+// ESP32-S3-WROOM pin map (D20). NOT the WROVER map in 01-HARDWARE.md sect 2,
+// which is now wrong for our hardware:
+//   * GPIO 32/33 DO NOT EXIST on this board's header
+//   * GPIO 13/15 are the camera's PCLK and XCLK -- a button there fights
+//     the camera
+//   * GPIO 35/36/37 are the PSRAM bus, 19/20 are native USB, 48 is the RGB
+//     LED, and 0/3/45/46 are strapping pins
+// Confirmed map and the reasoning: hardware/wiring.md
 // ── Audio ───────────────────────────────────────────────────────────────
 // 24 kHz 16-bit mono headerless — CONFIRMED against the live API (D15) and
 // matching the Messages/*.wav headers. No longer an open question.
 #define TTS_SAMPLE_RATE 24000
-#define I2S_BCK_PIN     32
-#define I2S_LCK_PIN     33
-#define I2S_DIN_PIN     14
-#define I2S_MCLK_PIN    -1   // GPIO 0 only if the ES7148 needs MCLK (HW day 2)
+#define I2S_BCK_PIN     42
+#define I2S_LCK_PIN     41
+#define I2S_DIN_PIN     40
+#define I2S_MCLK_PIN    -1   // -> 39 if the ES7148 needs MCLK. Any GPIO
+                             // works on S3, unlike the classic ESP32
 
 // Speaker channel -- the other half of the day-2 hardware question.
 // 0 = mono, left channel only. Start here.
@@ -76,8 +88,8 @@
 #define I2S_DUPLICATE_TO_STEREO 0
 
 // ── Buttons ─────────────────────────────────────────────────────────────
-#define BTN_A_PIN       13   // Read (short) / Summarise (long)
-#define BTN_B_PIN       15   // Describe (short) / Repeat (long)
+#define BTN_A_PIN       47   // Read (short) / Summarise (long)
+#define BTN_B_PIN       21   // Describe (short) / Repeat (long)
 #define BTN_DEBOUNCE_MS 40
 #define BTN_LONGPRESS_MS 700
 
