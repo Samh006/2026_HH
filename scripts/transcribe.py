@@ -25,7 +25,14 @@ def makeBase64Url(file_path: str):
 
     return f"data:{file_mime};base64,{b64_str}"
 
-def transcribe(url):
+def transcribe(url: str):
+    """
+    Function that accepts a url to an image and gets a model hosted on openrouter to transcribe the text in the image
+    Args:
+        url: string url to image
+    Returns:
+        str: string response from openrouter model
+    """
     with OpenRouter(
         api_key = os.getenv("OPENROUTER_API_KEY", "") # openrouter API key stored in environment variable
     ) as client:
