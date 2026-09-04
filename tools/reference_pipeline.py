@@ -42,12 +42,26 @@ TTS_VOICE = "alloy"
 TTS_FORMAT = "pcm16"
 
 PROMPTS = {
+    # D17: on a degraded label EVERY candidate model confidently invented
+    # numbers rather than abstaining -- quantity 56 read as 60, expiry dates
+    # returned as 09/31/26 (a date that does not exist), a fabricated
+    # distributor line. For a device that reads medicine labels aloud to
+    # someone who cannot check the result, that is the most dangerous failure
+    # mode in the project. These three sentences do not make the numbers
+    # right; they make the device honest about which ones to trust.
+    # firmware/src/main.cpp looks for UNCLEAR and [?] and speaks a warning
+    # before the text, so this wording and that check must stay in step.
     "read": (
         "Transcribe all text visible in this image, exactly as written. "
         "Preserve the reading order a sighted person would use. Output ONLY "
         "the transcribed text -- no preamble, no description, no commentary, "
-        "no markdown. If the image contains no legible text, output exactly: "
-        "NOTEXT"),
+        "no markdown. "
+        "Never guess a character you cannot clearly see. Mark any digit you "
+        "cannot read with certainty as [?]. After any dose, quantity, date, "
+        "time or amount of money that you cannot read with full certainty, "
+        "write UNCLEAR. It is far better to say UNCLEAR than to guess a "
+        "number. "
+        "If the image contains no legible text, output exactly: NOTEXT"),
     "describe": (
         "Describe what is in front of the user in one or two short sentences, "
         "as if speaking to a person with low vision who is holding this "
