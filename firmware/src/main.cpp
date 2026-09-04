@@ -1,93 +1,232 @@
-// main.cpp -- Talking Reader
+// main.cpp -- Talking Reader state machine.
 //
-// STEP 1 + 2 of the firmware build order: prove the toolchain, prove the
-// buttons. No camera, no network, no audio yet -- those slot in below where
-// marked, and each is testable on its own.
+//   IDLE -> CAPTURE -> UPLOAD -> WAIT_TEXT -> UPLOAD_TTS -> SPEAKING
+//     ^                                                        |
+//     +------------- any button, or end of audio --------------+
+//                            |
+//     any failure -> SPEAK_PHRASE(error) -> IDLE
 //
-// Flash this, open the serial monitor at 115200, and press the buttons. You
-// should see four distinct events and no double-fires.
+// Three non-negotiables from 02-SOFTWARE.md section 7:
+//   1. Any button during SPEAKING stops playback immediately.
+//   2. Presses during CAPTURE/UPLOAD are IGNORED, never queued -- a queued
+//      press is a second paid API call and a confusing double-read.
+//   3. Every failure path speaks. Silence is a bug.
 //
-//   pio run                        compile
-//   pio run -t upload              flash
-//   pio device monitor -b 115200   watch
+//   pio run -t upload && pio device monitor -b 115200
 #include <Arduino.h>
+#include <WiFi.h>
 
+#include "audio.h"
 #include "buttons.h"
 #include "config.h"
+#include "phrase.h"
+#include "pipeline.h"
+#include "speech.h"
 
-// ---------------------------------------------------------------------------
-// Heap logging. 02-SOFTWARE.md section 6.1: log free heap before and after
-// every phase FROM DAY ONE. TLS wants 40-50 KB of internal heap and will not
-// use PSRAM, so it has to coexist with the camera framebuffer -- that is where
-// the crashes live. Retrofitting this logging after you have a crash costs a
-// day, so it goes in before there is anything to measure.
-// ---------------------------------------------------------------------------
+namespace {
+
+enum State : uint8_t {
+    ST_IDLE = 0, ST_CAPTURE, ST_VISION, ST_SPEAKING, ST_ERROR,
+};
+
+State g_state = ST_IDLE;
+
+// Last result, for Repeat. Lives in PSRAM-free internal RAM: 1 KB is cheap and
+// Repeat must work with no network at all.
+constexpr size_t TEXT_MAX = 1024;
+char g_last_text[TEXT_MAX] = {0};
+bool g_have_last = false;
+
 void log_heap(const char *phase) {
     Serial.printf("[heap] %-22s free=%7u  min=%7u  largest=%7u  psram=%8u\n",
-                  phase,
-                  (unsigned)ESP.getFreeHeap(),
+                  phase, (unsigned)ESP.getFreeHeap(),
                   (unsigned)ESP.getMinFreeHeap(),
                   (unsigned)ESP.getMaxAllocHeap(),
                   (unsigned)ESP.getFreePsram());
 }
 
+bool wifi_connect() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
+    phrase_play(PH_CONNECTING);
+    const char *ssids[] = {WIFI_SSID_1, WIFI_SSID_2};
+    const char *passes[] = {WIFI_PASS_1, WIFI_PASS_2};
+    for (int i = 0; i < 2; i++) {
+        Serial.printf("[wifi] trying '%s'\n", ssids[i]);
+        WiFi.begin(ssids[i], passes[i]);
+        const uint32_t deadline = millis() + WIFI_TIMEOUT_MS;
+        while (millis() < deadline) {
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.printf("[wifi] connected, ip=%s rssi=%d\n",
+                              WiFi.localIP().toString().c_str(), WiFi.RSSI());
+                return true;
+            }
+            delay(200);
+        }
+        WiFi.disconnect();
+    }
+    Serial.println("[wifi] both networks failed");
+    return false;
+}
+
+// D17: models confidently invent digits on a hard image rather than abstain.
+// The prompt now asks them to mark what they cannot read, and the device has
+// to actually voice that doubt -- a silent [?] is worse than useless to
+// someone who cannot check the label themselves.
+bool text_is_uncertain(const char *s) {
+    return strstr(s, "UNCLEAR") != nullptr || strstr(s, "[?]") != nullptr;
+}
+
+void speak_result(const char *text) {
+    g_state = ST_SPEAKING;
+
+    if (text_is_uncertain(text)) {
+        Serial.println("[stm ] uncertainty markers present -- warning first");
+        phrase_play(PH_UNCERTAIN);
+    }
+
+    const SpeechStats st = speech_say(text);
+    if (!st.ok && st.samples == 0) {
+        // Nothing came out at all. That is a failure path, so it speaks.
+        Serial.println("[stm ] TTS produced no audio");
+        earcon_error();
+        phrase_play(PH_ERROR);
+    }
+    audio_drain();
+}
+
+void handle(Mode mode) {
+    log_heap("press");
+
+    // 1. Immediate physical confirmation, before anything slow.
+    earcon_shutter();
+    phrase_play(mode == MODE_DESCRIBE ? PH_DESCRIBING : PH_READING);
+
+    if (!wifi_connect()) {
+        earcon_error();
+        phrase_play(PH_NO_INTERNET);
+        g_state = ST_IDLE;
+        return;
+    }
+
+    // 2. Capture.
+    g_state = ST_CAPTURE;
+    const uint8_t *jpeg = nullptr;
+    size_t jpeg_len = 0;
+    if (!camera_capture(&jpeg, &jpeg_len)) {
+        Serial.println("[stm ] capture failed");
+        earcon_error();
+        phrase_play(PH_ERROR);
+        g_state = ST_IDLE;
+        return;
+    }
+    Serial.printf("[stm ] captured %u bytes\n", (unsigned)jpeg_len);
+    log_heap("after capture");
+
+    // 3. Vision.
+    g_state = ST_VISION;
+    char text[TEXT_MAX];
+    const bool got = vision_read(jpeg, jpeg_len, mode, text, sizeof(text));
+    camera_release();
+    log_heap("after vision");
+
+    if (!got) {
+        Serial.println("[stm ] vision failed");
+        earcon_error();
+        phrase_play(PH_ERROR);
+        g_state = ST_IDLE;
+        return;
+    }
+
+    // NOTEXT is handled here, on the device, with a recorded phrase. Sending
+    // it to TTS would cost money and sound like a malfunction.
+    if (strcmp(text, "NOTEXT") == 0) {
+        Serial.println("[stm ] NOTEXT");
+        phrase_play(PH_NO_TEXT);
+        g_state = ST_IDLE;
+        return;
+    }
+
+    strncpy(g_last_text, text, TEXT_MAX - 1);
+    g_last_text[TEXT_MAX - 1] = '\0';
+    g_have_last = true;
+
+    // 4. Speak.
+    speak_result(text);
+    log_heap("after speech");
+    g_state = ST_IDLE;
+}
+
+void handle_repeat() {
+    if (!g_have_last) {
+        Serial.println("[stm ] repeat with nothing cached");
+        phrase_play(PH_NO_TEXT);
+        return;
+    }
+    phrase_play(PH_REPEATING);
+    // Note: this still calls TTS. Caching the PCM rather than the text would
+    // make Repeat work fully offline, which the plan wants -- but 20 s of
+    // audio is ~1 MB, so it has to live in PSRAM. Worth doing once the happy
+    // path is proven.
+    speak_result(g_last_text);
+    g_state = ST_IDLE;
+}
+
+}  // namespace
+
 void setup() {
     Serial.begin(115200);
-    delay(300);                       // let the USB-UART settle before printing
+    delay(300);
 
-    Serial.println();
+    Serial.println("\n=====================================");
+    Serial.println(" Talking Reader");
     Serial.println("=====================================");
-    Serial.println(" Talking Reader -- firmware step 1+2");
-    Serial.println("=====================================");
-    Serial.printf("  chip      : %s rev%d, %d core(s) @ %d MHz\n",
-                  ESP.getChipModel(), ESP.getChipRevision(),
-                  ESP.getChipCores(), getCpuFrequencyMhz());
-    Serial.printf("  flash     : %u KB\n", (unsigned)(ESP.getFlashChipSize() / 1024));
-    Serial.printf("  psram     : %u KB %s\n",
-                  (unsigned)(ESP.getPsramSize() / 1024),
-                  ESP.getPsramSize() ? "" : "  <-- PSRAM MISSING, camera will fail");
-    Serial.printf("  backend   : %s\n",
-                  USE_MOCK_SERVER ? "MOCK  " MOCK_BASE_URL : "OpenRouter (TLS)");
-    Serial.printf("  buttons   : A=GPIO%d  B=GPIO%d  (debounce %dms, long %dms)\n",
-                  BTN_A_PIN, BTN_B_PIN, BTN_DEBOUNCE_MS, BTN_LONGPRESS_MS);
-    Serial.printf("  i2s       : BCK=%d LCK=%d DIN=%d MCLK=%d  @ %d Hz\n",
-                  I2S_BCK_PIN, I2S_LCK_PIN, I2S_DIN_PIN, I2S_MCLK_PIN,
-                  TTS_SAMPLE_RATE);
-    Serial.println();
-
+    Serial.printf("  chip    : %s rev%d @ %d MHz\n", ESP.getChipModel(),
+                  ESP.getChipRevision(), getCpuFrequencyMhz());
+    Serial.printf("  psram   : %u KB%s\n", (unsigned)(ESP.getPsramSize() / 1024),
+                  ESP.getPsramSize() ? "" : "   <-- MISSING, camera will fail");
+    Serial.printf("  backend : %s\n",
+                  USE_MOCK_SERVER ? "MOCK " MOCK_BASE_URL : "OpenRouter (TLS)");
+    if (pipeline_is_stubbed()) {
+        Serial.println("  pipeline: *** STUBBED *** camera/vision are fake -- "
+                       "text below is canned, not read from a photo");
+    }
     log_heap("boot");
 
     buttons_begin();
-    log_heap("after buttons_begin");
+    if (!audio_begin()) {
+        Serial.println("[boot] audio failed to start -- the device cannot speak");
+    }
+    phrase_report_missing();
 
-    // TODO step 3  audio_begin();      I2S init + phrase playback from flash
-    // TODO step 4  speech_*            SSE -> base64 -> PCM -> i2s_write
-    // TODO         camera_begin();     <- other SWE
-    // TODO         wifi_begin();
-
-    Serial.println("\nready -- press a button\n");
+    phrase_play(PH_READY);
+    Serial.println("\nready -- A short=read, A long=summarise, "
+                   "B short=describe, B long=repeat\n");
 }
 
 void loop() {
     const ButtonEvent e = buttons_poll();
     if (e != BTN_NONE) {
-        Serial.printf("[btn ] %8lu ms  %s\n",
-                      (unsigned long)millis(), button_event_name(e));
-
-        // STEP 5 will replace this with the state machine:
-        //
-        //   IDLE -> CAPTURE -> UPLOAD -> WAIT_TEXT -> UPLOAD_TTS -> SPEAKING
-        //
-        // Non-negotiables from 02-SOFTWARE.md section 7:
-        //   - any button during SPEAKING stops playback immediately
-        //   - presses during CAPTURE/UPLOAD are IGNORED, never queued
-        //     (a queued press = a second paid call and a confusing double-read)
-        //   - every failure path speaks a phrase. Silence is a bug.
+        Serial.printf("\n[btn ] %s\n", button_event_name(e));
+        switch (e) {
+            case BTN_A_SHORT: handle(MODE_READ); break;
+            case BTN_A_LONG:  handle(MODE_SUMMARISE); break;
+            case BTN_B_SHORT: handle(MODE_DESCRIBE); break;
+            case BTN_B_LONG:  handle_repeat(); break;
+            default: break;
+        }
+        // Swallow the press that stopped playback so it does not immediately
+        // start a new read.
+        while (buttons_any_down()) {
+            delay(10);
+        }
+        audio_clear_stop();
+        buttons_poll();
     }
 
-    // Heartbeat, so a wedged loop is obvious on the monitor.
     static uint32_t last = 0;
-    if (millis() - last > 10000) {
+    if (g_state == ST_IDLE && millis() - last > 30000) {
         last = millis();
         log_heap("idle");
     }

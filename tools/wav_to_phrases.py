@@ -181,6 +181,16 @@ def main():
                     "// Regenerate after changing anything in Messages/.\n"
                     "#pragma once\n#include <stdint.h>\n#include <stddef.h>\n\n"
                     f"#define PHRASE_SAMPLE_RATE {TARGET_SR}\n\n")
+            # HAVE_PHRASE_<NAME> lets the firmware compile against the full
+            # phrase set while only some are recorded. Without it there is no
+            # way to test for a phrase's existence -- these are variables, not
+            # macros, so #ifdef on the array name would not work.
+            f.write("// Which phrases exist in this build. The state machine\n"
+                    "// needs all of them; missing ones are logged, not fatal.\n")
+            for _, name, _ in results:
+                f.write(f"#define HAVE_PHRASE_{name} 1\n")
+            f.write("\n")
+
             for stem, name, pcm in results:
                 f.write(f"// {stem}.wav -- {len(pcm)/TARGET_SR:.2f}s, "
                         f"{pcm.nbytes/1024:.1f} KB\n"
