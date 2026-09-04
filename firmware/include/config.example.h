@@ -33,19 +33,47 @@
 #define OR_API_KEY      "sk-or-v1-REPLACE-ME"   // ← never commit this
 
 // ── Models ──────────────────────────────────────────────────────────────
+// D16 measured gemini-3.5-flash-lite at 1.4 s faster and 37% cheaper for the
+// same accuracy, but says do not switch on synthetic images alone. Confirm on
+// the 20-photo eval set first, then change this line.
 #define VISION_MODEL    "google/gemini-3-flash-preview"
-#define TTS_MODEL       "openai/gpt-4o-mini-tts-2025-12-15"
-#define TTS_VOICE       "alloy"        // must match the cloned phrase voice
 #define VISION_MAX_TOK  400
 
+// ── Speech (D14 — read this before writing net.cpp) ─────────────────────
+// There is NO /audio/speech endpoint on OpenRouter and NO response_format:
+// pcm. Both return 400. Of 396 models only gpt-audio and gpt-audio-mini emit
+// speech, and they do it through /chat/completions:
+//
+//   POST /chat/completions
+//   { "model": TTS_MODEL, "stream": true,          ← audio is refused without it
+//     "modalities": ["text","audio"],
+//     "audio": { "voice": TTS_VOICE, "format": TTS_AUDIO_FORMAT },
+//     "messages": [{ "role":"user", "content": "<text to speak>" }] }
+//
+// Audio comes back base64-encoded inside SSE deltas at
+// choices[0].delta.audio.data — not as a raw body. So the device needs SSE
+// line framing plus a base64 decoder. Each delta is independently padded, so
+// it decodes standalone; keep a ONE-BYTE CARRY across deltas so a 16-bit
+// sample is never split across an i2s_write(). See tools/reference_pipeline.py
+// tts(), which is the working reference.
+#define TTS_MODEL       "openai/gpt-audio-mini"
+#define TTS_VOICE       "alloy"        // must match the phrase-bank voice
+#define TTS_AUDIO_FORMAT "pcm16"
+
 // ── Audio ───────────────────────────────────────────────────────────────
-// 24000 confirmed against the Messages/*.wav headers. STILL TO CONFIRM
-// against a live /audio/speech response — see tools/reference_pipeline.py
+// 24 kHz 16-bit mono headerless — CONFIRMED against the live API (D15) and
+// matching the Messages/*.wav headers. No longer an open question.
 #define TTS_SAMPLE_RATE 24000
 #define I2S_BCK_PIN     32
 #define I2S_LCK_PIN     33
 #define I2S_DIN_PIN     14
 #define I2S_MCLK_PIN    -1   // GPIO 0 only if the ES7148 needs MCLK (HW day 2)
+
+// Speaker channel -- the other half of the day-2 hardware question.
+// 0 = mono, left channel only. Start here.
+// 1 = duplicate every sample to both channels. Try this if the DAC is
+//     visibly clocking but the speaker is silent. (02-SOFTWARE.md section 6.3)
+#define I2S_DUPLICATE_TO_STEREO 0
 
 // ── Buttons ─────────────────────────────────────────────────────────────
 #define BTN_A_PIN       13   // Read (short) / Summarise (long)

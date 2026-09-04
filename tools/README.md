@@ -62,8 +62,15 @@ python tools/reference_pipeline.py photo.jpg --mode read --probe-rate
 ```
 
 `--mode read|describe|summarise`, `--text-only` to skip TTS while tuning
-prompts (free), `--probe-rate` to confirm the real TTS sample rate. If the
-device disagrees with this script, the device is wrong.
+prompts (free), `--probe-rate` to re-check the TTS sample rate if a model
+changes (it is confirmed at 24 kHz — D15). If the device disagrees with this
+script, the device is wrong.
+
+**Firmware: `tts()` in this file is the audio path to port.** It is the only
+working implementation of the D14 shape — SSE framing, per-delta base64
+decode, one-byte sample carry — and it is deliberately written the way
+`audio.cpp` has to be written. It reports time-to-first-audio-byte separately
+from completion, because the first is what the user actually experiences.
 
 ### 5. Eval set
 

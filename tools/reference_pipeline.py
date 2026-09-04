@@ -12,10 +12,12 @@ this script, the device is wrong.
     set OPENROUTER_API_KEY=sk-or-v1-...
     python tools/reference_pipeline.py photo.jpg --mode read --out out.wav
 
-Its other job is the day-1 task in 02-SOFTWARE.md section 4: CONFIRM THE TTS
-SAMPLE RATE against a real response and tell the firmware track the number.
-Pass --probe-rate and it reports what actually came back rather than trusting
-the 24 kHz assumption. Get this wrong and everything plays chipmunked.
+The speech leg follows D14, NOT section 4 of the software brief: that section
+describes /audio/speech with response_format: pcm, which does not exist on
+OpenRouter. See tts() for the shape that actually works.
+
+The sample rate question the brief raises on day 1 is closed -- 24 kHz 16-bit
+mono, confirmed in D15. --probe-rate re-checks it if a model ever changes.
 """
 import argparse
 import base64
@@ -29,9 +31,15 @@ import time
 import requests
 
 DEFAULT_BASE = "https://openrouter.ai/api/v1"
+# D16 measured gemini-3.5-flash-lite as 1.4 s faster and 37% cheaper at equal
+# accuracy, but explicitly says do not switch on synthetic images alone.
+# Confirm on the 20-photo eval set, then change this line and config.h.
 VISION_MODEL = "google/gemini-3-flash-preview"
-TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
+# D14: the only OpenRouter models that emit speech are gpt-audio / gpt-audio-mini,
+# and they do it through /chat/completions, not /audio/speech. See tts().
+TTS_MODEL = "openai/gpt-audio-mini"
 TTS_VOICE = "alloy"
+TTS_FORMAT = "pcm16"
 
 PROMPTS = {
     "read": (
@@ -109,18 +117,74 @@ def vision(session, base, key, jpeg_path, mode, max_tokens=400):
     return text, dt
 
 
-def tts(session, base, key, text, fmt="pcm"):
-    body = {"model": TTS_MODEL, "input": text, "voice": TTS_VOICE,
-            "response_format": fmt, "speed": 1.0}
+def tts(session, base, key, text, voice=TTS_VOICE, fmt=TTS_FORMAT):
+    """Speech leg -- D14. OpenRouter has no /audio/speech endpoint and no
+    response_format: pcm; both return 400. Speech is a chat completion asked
+    for the audio modality, and audio output is REFUSED unless stream is true.
+    The bytes arrive base64-encoded inside SSE deltas at
+    choices[0].delta.audio.data.
+
+    Written the way firmware has to write it, because this is the file the
+    device copies: decode each delta as it arrives, keep a one-byte carry so a
+    16-bit sample is never split across an i2s_write(), and never buffer the
+    whole utterance waiting for [DONE].
+
+    Returns (pcm, seconds_to_first_audio_byte, seconds_to_complete). The first
+    of those is the number that matters -- it is when the user hears speech."""
+    body = {
+        "model": TTS_MODEL,
+        "modalities": ["text", "audio"],
+        "audio": {"voice": voice, "format": fmt},
+        "stream": True,          # not optional: audio is refused without it
+        "messages": [{"role": "user", "content": text}],
+    }
     t0 = time.time()
-    r = session.post(f"{base}/audio/speech", json=body,
-                     headers=auth(key), timeout=120)
-    dt = time.time() - t0
+    r = session.post(f"{base}/chat/completions", json=body,
+                     headers=auth(key), stream=True, timeout=120)
     if r.status_code != 200:
         sys.exit(f"tts failed {r.status_code}: {r.text[:300]}")
-    print(f"  tts         : {dt:.2f}s, {len(r.content)} bytes, "
-          f"content-type={r.headers.get('Content-Type')}")
-    return r.content, dt, r.headers.get("Content-Type", "")
+
+    pcm = bytearray()
+    carry = b""              # the odd byte -- half of a 16-bit sample
+    chunks = 0
+    t_first = None
+    transcript = ""
+    for line in r.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            delta = json.loads(payload)["choices"][0].get("delta") or {}
+        except (ValueError, KeyError, IndexError):
+            continue                      # keep-alives and non-audio deltas
+        audio = delta.get("audio") or {}
+        transcript = audio.get("transcript") or transcript
+        b64 = audio.get("data")
+        if not b64:
+            continue
+        if t_first is None:
+            t_first = time.time() - t0
+        chunks += 1
+        # Each delta carries its own padded base64 blob, so it decodes
+        # standalone -- there is no base64 carry across deltas. What does NOT
+        # survive is sample alignment: an odd-length decode splits a 16-bit
+        # sample, which on the device is a periodic click (section 11.4).
+        buf = carry + base64.b64decode(b64)
+        carry, buf = (buf[-1:], buf[:-1]) if len(buf) % 2 else (b"", buf)
+        pcm += buf                        # <- on the device this is i2s_write()
+
+    dt = time.time() - t0
+    if not pcm:
+        sys.exit("tts returned no audio deltas -- check modalities and stream")
+    if carry:
+        print("  ! stream ended mid-sample; one trailing byte dropped")
+    print(f"  tts         : first byte {t_first:.2f}s, complete {dt:.2f}s, "
+          f"{chunks} chunks, {len(pcm)} bytes")
+    if transcript:
+        print(f"  transcript  : {transcript[:70]!r}")
+    return bytes(pcm), t_first, dt
 
 
 def auth(key):
@@ -224,14 +288,7 @@ def main():
     if args.text_only:
         return 0
 
-    pcm, t_tts, ctype = tts(session, args.base_url, key, text)
-    if "json" in ctype:
-        sys.exit("TTS returned JSON, not audio -- check response_format=pcm")
-
-    if len(pcm) % 2:
-        print("  ! odd byte count -- a 16-bit sample is split. On the device "
-              "this is\n    the one-byte carry across chunk boundaries "
-              "(section 6.2/11.4).")
+    pcm, t_first, t_tts = tts(session, args.base_url, key, text)
 
     with open(args.out, "wb") as f:
         f.write(wrap_wav(pcm, args.rate))
@@ -242,9 +299,15 @@ def main():
         probe_rate(pcm, args.rate)
 
     print(f"\n  TOTAL       : {time.time() - t_start:.2f}s "
-          f"(vision {t_vision:.2f}s + tts {t_tts:.2f}s)")
-    print(f"  chars to TTS: {len(text)}  (billed per input character)")
-    print("  target      : first spoken word under 6 s\n")
+          f"(vision {t_vision:.2f}s + tts to completion {t_tts:.2f}s)")
+    # The cloud half of the 6 s budget. Device capture, upload and I2S start
+    # are on top of this, and are not measured here.
+    first_word = t_vision + t_first
+    verdict = "OK" if first_word < 6 else "OVER"
+    print(f"  first word  : {first_word:.2f}s cloud-only  "
+          f"(vision {t_vision:.2f}s + TTS first byte {t_first:.2f}s)  "
+          f"[{verdict} vs 6 s]")
+    print(f"  chars to TTS: {len(text)}  (billed per input character)\n")
     return 0
 
 
