@@ -4,14 +4,28 @@ import mimetypes
 import sys
 import os
 
-def transcribe(img_path):
-    # encode the image in a base64 url
-    with open(img_path, "rb") as img_file:
-        base64_string = base64.b64encode(img_file.read()).decode("utf-8")
+def makeBase64Url(file_path: str):
+    """
+    Function that accepts path to a file, encodes it in a base64 and returns the resulting base64 url
+    Args:
+        file_path: string path of the file to be encoded
+    Returns:
+        str: string base64 url
+    Raises:
+        ValueError: if the MIME type of the provided file could not be determined
+    """
+    file_mime, _ = mimetypes.guess_type(file_path)
 
-    #base64_url = f"data:image/jpeg;base64,{base64_string}"
-    base64_url = f"data:{mimetypes.guess_type(img_path)};base64,{base64_string}"
+    # raises an exception if MIME type could not be guessed
+    if not file_mime:
+        raise ValueError(f"Could not determine MIME type of {file_path}")
 
+    with open(file_path, "rb") as file:
+        b64_str = base64.b64encode(file.read()).decode("utf-8")
+
+    return f"data:{file_mime};base64,{b64_str}"
+
+def transcribe(url):
     with OpenRouter(
         api_key = os.getenv("OPENROUTER_API_KEY", "") # openrouter API key stored in environment variable
     ) as client:
@@ -28,7 +42,7 @@ def transcribe(img_path):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": base64_url
+                                "url": url
                             }
                         }
                     ]
@@ -45,6 +59,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("ERROR: No path provided, usage: python transcribe.py <path/to/image>")
     else:
-        text = transcribe(sys.argv[1])
+        url = makeBase64Url(sys.argv[1])
+        text = transcribe(url)
         sys.stdout.write(text)
         sys.stdout.flush()
