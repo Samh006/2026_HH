@@ -429,6 +429,27 @@ def tts_from_image():
                     headers={"Content-Length": str(len(body))})
 
 
+@app.post("/mock/upload")
+def mock_upload():
+    """Save a JPEG and say nothing back. For bench experiments where the
+    picture is the point and 300 KB of audio per press is just noise --
+    the resolution comparison in restest.cpp, mainly. ?tag= names the file
+    so several captures of the same scene stay tellable apart."""
+    raw = request.get_data() or b""
+    tag = re.sub(r"[^A-Za-z0-9_-]", "", request.args.get("tag", ""))[:24]
+    info, err = check_jpeg_raw(raw)
+    if err:
+        log(f"  ! upload rejected: {err}")
+        return jsonify({"error": err}), 400
+    os.makedirs(CAPTURE_DIR, exist_ok=True)
+    name = f"{datetime.now():%Y%m%d-%H%M%S}{'-' + tag if tag else ''}.jpg"
+    path = os.path.join(CAPTURE_DIR, name)
+    with open(path, "wb") as f:
+        f.write(raw)
+    log(f"  upload {tag or '(untagged)'}: {len(raw)}B {info['dims']} -> {path}")
+    return jsonify({"saved": path, "bytes": len(raw), "dims": info["dims"]})
+
+
 @app.post("/mock/scenario")
 def set_scenario():
     want = (request.form.get("scenario")
