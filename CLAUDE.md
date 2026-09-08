@@ -9,10 +9,14 @@ which is why wrong numbers matter more than anything else here.
 
 ## Read before doing anything
 
-1. `docs/decisions.md` — D1–D24. The source of truth. Records *why*, including
+1. `docs/decisions.md` — D1–D27. The source of truth. Records *why*, including
    the failure signatures of bugs that already cost us a day.
-2. `docs/TODAY.md` — most recent working session: plan and what actually happened.
-3. `hardware/wiring.md` — the live pin map.
+2. `docs/TODAY.md` — most recent working session: plan and what actually
+   happened. Older sessions are archived in `docs/sessions/`.
+3. `hardware/wiring.md` — the live pin map. **Rewritten 8 Sep for the S3**;
+   `01-HARDWARE.md` §2 is the old WROVER map and is wrong for this board.
+4. `docs/SERVER_CONTRACT.md` — what the device POSTs and what it needs back.
+   **Start here if you are working on the ASP.NET server** and not the firmware.
 
 ## Five things that will otherwise cost you hours
 
@@ -65,9 +69,14 @@ python tools/test_mock.py                            # 21 conformance assertions
 
 - **Sam (this repo's main user)** — `main.cpp`, `buttons`, `audio`, `phrase`,
   `reader`. All working.
-- **Other SWE** — `camera.cpp` and `vision.cpp`, **not yet written**.
+- **Other SWE** — `camera.cpp` ✅ **written and confirmed on hardware 8 Sep**
+  (OV3660 detected, 136 ms capture, no leak). `vision.cpp` **still unwritten**,
+  and only needed if `USE_LOCAL_SERVER` goes back to 0.
   `pipeline.h` is the agreed contract; `pipeline_stub.cpp` provides weak
-  symbols so the two halves cannot collide. Delete the stub when both are real.
+  symbols so the two halves cannot collide. **Keep the stub** until `vision.cpp`
+  exists — `camera.cpp`'s strong symbols already override its half.
+  ⚠️ `camera_release()` calls `free()`, **not** `esp_camera_fb_return()` — the
+  buffer is ours, not the driver's. See D26 and the header of `camera.cpp`.
 - **Kristian** — the ASP.NET server.
 - **Mechatronics** — lens refocus, LEDs, enclosure, power.
 

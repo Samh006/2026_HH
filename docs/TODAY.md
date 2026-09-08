@@ -1,358 +1,258 @@
-# Today — 4 Sep 2026 · full team present
+# Today — 8 Sep 2026 · full team present, in person
 
-**Day 1 of 11.** Ships 14 Sep. Freeze 12 Sep.
+**Day 5 of 11.** Freeze 12 Sep — **four days.** Showcase 15 Sep.
 
-Cloud tooling is done and ahead. **Firmware is zero lines and hardware has zero
-recorded measurements.** Today exists to change both of those, and to make the
-four decisions that are currently blocking other people's work.
+> ⚠️ **The dates disagree across our own documents and nobody has settled it.**
+> `CLAUDE.md` says showcase 15 Sep. The 4 Sep plan said ship 14 Sep, freeze
+> 12 Sep. Pick one today and write it in `CLAUDE.md`, because "four days" and
+> "seven days" are different projects.
 
-> **Today's win condition:** the board takes a photo and speech comes out of the
-> speaker — even if those are two separate demos on the same bench.
+Day 1 (4 Sep) got the week-1 milestone: button press → speech. Everything
+between the camera and the speaker has worked since then. **Days 2–4 are
+unrecorded** — this file is the first session log since.
 
----
-
-## Part 1 — First 90 minutes, everyone together
-
-These are the "Day 1, together" items from `00-TEAM-PLAN.md` §11 and
-`02-SOFTWARE.md` §2. None have been done, and three of them block other people.
-**Do these before splitting up.**
-
-- [ ] **PlatformIO installed and working on all four machines.** Not the Arduino
-      IDE — `02-SOFTWARE.md` §1 explains why (global library folder = "works on
-      my machine" bugs you can't afford in 11 days).
-- [ ] **Everyone flashes Freenove's `CameraWebServer` example and sees the
-      stream in a browser.** 20 minutes, and it proves board + camera + USB +
-      Wi-Fi all at once. It also means all four of you can flash a board, which
-      matters when one person is stuck.
-- [ ] 🔴 **Confirm the camera pin map against your exact board revision.**
-      Open Freenove's pinout diagram for the revision you physically have and
-      check it against the table in `01-HARDWARE.md` §2. **Revisions differ and
-      everything downstream depends on this.** Write the confirmed map into
-      `hardware/wiring.md` and tell the firmware track.
-- [ ] 🔴 **Refocus the lens.** The OV2640 barrel is threaded and set near
-      infinity from the factory. You use this at 15–25 cm. Rotate it to reading
-      distance, check against the browser stream from the step above, lock it
-      with nail varnish or thread-lock. **Five minutes. D18 makes this a primary
-      accuracy mechanism, not polish** — do it before anyone tunes a prompt or
-      shoots an eval photo against a blurry image.
-- [ ] **Everyone makes one `curl` to OpenRouter with an image** and sees text
-      come back. Cheap, and it means nobody's first encounter with the API is
-      during a bug hunt.
-- [ ] **Copy `config.h` on every machine** and put the laptop's LAN IP in it:
-      `cp firmware/include/config.example.h firmware/src/config.h`
+> **Today's win condition:** one real photo, read aloud, end to end.
+> camera captures → POST to the ASP.NET server → speech out of the speaker.
 
 ---
 
-## Part 2 — Four decisions, while you're all in one room
+## The four things that have to land
 
-These take fifteen minutes of talking and each one is blocking real work.
-Write the outcome into `docs/decisions.md` as D20–D23 before you split.
+| # | Item | Status |
+|---|---|---|
+| 1 | **`camera.cpp`** — JPEG to PSRAM behind the `pipeline.h` contract | ✅ **DONE, verified on hardware** |
+| 2 | **Kristian's four server changes** | ⬜ not started as of this write-up |
+| 3 | **Hotspot + `SERVER_BASE_URL`** | ✅ **correct** — hotspot up, board joined, URL points at the right laptop |
+| 4 | **Flash and test** | 🟡 flashed and tested up to the server, which refused |
 
-- [ ] 🔴 **Voice cloning: Route A or Route B?** `kyutai/pocket-tts` is gated —
-      it needs its HF terms accepted plus a local login, otherwise it silently
-      falls back to 26 fixed voices with no cloning.
-      **A:** accept the terms, keep D6's one-voice-throughout goal.
-      **B:** pick a catalog voice for the offline phrases, then choose the
-      closest-sounding OpenRouter voice — this reverses D13's ordering.
-      *Blocks 7 of 10 phrases, including the D17 "I am not certain" phrase.*
-- [ ] 🔴 **Name the demo owner and the user-testing owner.** The plan's own
-      words: named in week 1 or they don't happen.
-- [ ] 🔴 **Book 3–4 test users for day 9 (12 Sep).** Phone calls, today. Booked
-      later than today and they probably can't make the date — and user testing
-      is what turns "a phone app is worse for these users" from an assertion
-      into evidence.
-- [ ] **Confirm the cut list.** Ship **Mode A (Read) + Repeat**. Cut voice
-      commands outright; cut Modes B and C from the plan but note they're a
-      prompt string on an identical code path — re-add on day 10 if the freeze
-      is calm. Agreeing this now stops anyone getting precious about it on day 8.
+### 1. camera.cpp — done ✅
 
----
-
-## Part 3 — Hardware lane
-
-**Owner: mechatronics.** Parts are available today, so the battery work happens
-today rather than waiting.
-
-Work through `01-HARDWARE.md` §5 in order — each step isolates one failure, so
-if step 3 fails you already know 1 and 2 are good.
-
-### The one that matters
-
-- [ ] 🔴 **Bench step 3 — play a WAV from flash through the speaker over I²S,
-      no network involved.** This is your deliverable for the day and the
-      firmware track's dependency. **Prioritise it over everything else,
-      including the enclosure.**
-      - Wiring: module VCC → 4.8 V rail (not 3.3 V — more volume, and the module
-        is rated 3.3–5 V). GND → common ground. BCK/LCK/DIN → GPIO **32/33/14**.
-      - Test audio: `tools/phrases_pcm16/*.wav` — already 16-bit PCM at 24 kHz.
-- [ ] 🔴 **Resolve the SCK question, in this order** (§4). It's a 20-minute test
-      that otherwise becomes a two-day bug:
-      1. Try it with **SCK unconnected**. Clean audio? Done — GPIO 0 stays free.
-      2. Silence or noise? **Ground SCK** and retry.
-      3. Still nothing? **Drive MCLK from GPIO 0** and configure it in I²S setup.
-      → Tell firmware which one worked.
-- [ ] 🔴 **Which channel is the speaker on?** `ONLY_LEFT` vs `RIGHT_LEFT`.
-      → Tell firmware. Both answers go in `hardware/wiring.md`.
-
-### Power
-
-- [ ] Wire the two 2×AA holders **in series** → 4×AA NiMH ≈ 4.8 V → board VIN.
-      *(A single 4×AA holder is cleaner if you have one — one part, no series link.)*
-- [ ] **1000 µF as close to the board's VIN pin as physically possible** —
-      absorbs Wi-Fi transmit spikes.
-- [ ] **470 µF at the audio module's VCC** — stops playback dragging the rail
-      down and resetting the ESP32 mid-sentence.
-- [ ] **0.1 µF ceramic across each**, closer to the chip than the electrolytic,
-      legs trimmed short.
-- [ ] ⚠️ **Check electrolytic polarity twice before power-on.** Reversed ones
-      vent. `01-HARDWARE.md` §9 bite #2.
-- [ ] ⚠️ **Verify common ground** between the board and the audio module. Most
-      common I²S failure there is — noise, or nothing at all.
-
-### Then
-
-- [ ] Bench step 4 — both buttons on GPIO 13 and 15, `INPUT_PULLUP` to GND,
-      debounced, clean single events on serial with no double-fires.
-- [ ] Bench step 5 — repeat steps 2–4 on battery instead of USB. Log the voltage.
-- [ ] **Two diffused white LEDs either side of the lens** — not one, a single
-      source shadows raised label text. Scrap of white PETG makes a diffuser.
-      D18 promoted this from polish to primary accuracy mechanism.
-- [ ] **Volume test.** Full-volume speech, phone SPL meter at 0.5 m, want
-      **≥ 75 dB**. Then take it into the noisiest room you can find. If it
-      disappoints, a 4 Ω speaker is a $5 fix — but only if you find out today.
-
-### Record as you go → `hardware/measurements.md`
-
-Idle current · peak current on Wi-Fi TX · current during playback · pack voltage
-fresh · SPL at 0.5 m. All eight rows are currently blank and every one is a
-number that goes straight into the writeup.
-
----
-
-## Part 4 — Firmware lane
-
-**Owner: computer engineer + 1 SWE pairing.** The cloud track is finished, so
-that SWE is free — the plan always intended this pairing.
-
-You develop against the **mock server**, not OpenRouter. Plain HTTP, deliberately.
+Written, built, flashed, and confirmed against the physical sensor.
 
 ```
-python tools/wav_to_phrases.py --emit-header    # generates phrases.h
-python tools/mock_server.py                     # banner prints the LAN IP
+[cam ] sensor PID=0x3660 (OV3660)
+[cam ] tuned: ae_level=-1 gainceiling=16x denoise=4 sharpness=2
+[cam ] ready: q12 fb_count=2 psram_free=8181959
+[cam ] frame 0: 26392 bytes   frame 1: 27256   frame 2: 27281  <- sharpest
+[cam ] kept 27281 bytes of 3 candidates
+[cam ] captured 27281 bytes in 254 ms
 ```
 
-Put that LAN IP in `MOCK_BASE_URL` — **not `127.0.0.1`, the ESP32 can't reach
-it.** Board and laptop must be on the same network; this is a classic day-1
-time sink.
+- **The camera pin map is now confirmed on silicon**, not just on paper. The
+  sensor answers on SCCB and identifies as `0x3660`. That closes an open
+  question that has been sitting in `wiring.md` since day one.
+- `camera_tuning.h`'s best-of-3 selection works as designed — three candidates,
+  the largest kept.
+- **Capture costs 136 ms** on a warm sensor (254 ms on the first press, which
+  includes lazy init). The budget allowed ~0.95 s for the whole device side, so
+  this is well inside it.
+- **No memory leak.** Two consecutive presses returned free heap to exactly
+  `250820` and PSRAM to `8181687` both times. See D26 for why that was the part
+  worth getting right.
+- The `*** STUBBED ***` banner is gone on the `USE_LOCAL_SERVER` path — the
+  weak symbols in `pipeline_stub.cpp` lost to the real ones at link time,
+  exactly as `pipeline.h` intended. No flag, no `#ifdef`, no edit to `main.cpp`.
 
-- [ ] **Project skeleton.** `platformio.ini` is already correct and pins
-      `espressif32@6.5.0` (Arduino-ESP32 core 2.0.14) — the legacy `i2s_config_t`
-      API in the brief matches that core. Don't unpin it (D9).
-- [ ] **`camera.cpp`** — capture a JPEG to PSRAM, print its size over serial.
-      `fb_location = CAMERA_FB_IN_PSRAM`, `fb_count = 1`, `FRAMESIZE_SVGA`,
-      quality 12.
-- [ ] **Log `ESP.getFreeHeap()` before and after every phase, from the first
-      commit.** §6.1 — this is where the crashes live, and retrofitting the
-      logging after you have a crash wastes a day.
-- [ ] **`net.cpp` — the streaming base64 uploader.** The `B64Stream` class is
-      already written out in `02-SOFTWARE.md` §6.2; port it as-is. Content-Length
-      is deterministic: `prefixLen + b64.encodedLength() + suffixLen`. Peak extra
-      RAM about a kilobyte. **Do not build the base64 as an Arduino `String`** —
-      that's 200 KB+ of peak allocation and it fails during the demo, not on the
-      bench.
-- [ ] **`audio.cpp`** — you can write it now, but you can't test it until the
-      hardware lane answers MCLK and channel. **Port `tts()` from
-      `tools/reference_pipeline.py`** — it's the only working implementation of
-      the real audio path and it's deliberately written the way `audio.cpp` has
-      to be: SSE line framing, per-delta base64 decode, one-byte sample carry.
-      Note each SSE delta is independently padded base64, so it decodes
-      standalone — the only carry you need is the 16-bit sample alignment.
-- [ ] **Test the failure paths early** — the mock injects them on demand:
-      ```
-      curl -X POST http://localhost:8080/mock/scenario -d scenario=notext
-      #   ok | notext | uncertain | http500 | timeout | garbage | empty
-      ```
+**`pipeline_stub.cpp` still exists and should stay** until `vision.cpp` is
+written or the two-leg path is dropped for good.
 
-### Acceptance for today
+### 3. Hotspot and `SERVER_BASE_URL` — correct ✅
 
-> **Press reset → the board takes a photo → canned text appears over serial.**
+```c
+#define SERVER_BASE_URL "http://172.20.10.4:5148"
+```
 
-That's the plan's *day 3* integration checkpoint. Hit it today and you're two
-days ahead of a schedule that has no slack in it.
+`172.20.10.4` is **Sam's laptop, which is where the server will run.** Sam is
+also the one hotspotting. So the config is right and nothing needs changing —
+the address is simply not answering yet, because the server is not running.
+
+Hotspot: 2.4 GHz, board associated at `172.20.10.6`, RSSI −35.
+
+⚠️ **`172.20.10.4` is a DHCP lease from the phone, not a fixed address.** If the
+laptop leaves the hotspot and rejoins — to grab something over campus Wi-Fi,
+say — it can come back on a different `172.20.10.x`. Re-check with `ipconfig`
+after any network switch, because the symptom is identical to the server being
+down and it costs a reflash.
+
+#### What running it here actually needs
+
+Checked on 8 Sep. **The .NET SDK is not installed on this laptop**, so
+`dotnet run` — the command in `config.h`'s own comment — will fail:
+
+```
+No .NET SDKs were found.
+```
+
+But the **runtimes are** there, and one of them is the right one:
+
+```
+Microsoft.AspNetCore.App  9.0.10          <- this is the one that matters
+Microsoft.NETCore.App     8.0.18 / 9.0.10 / 10.0.3
+```
+
+So there are three ways in, cheapest first:
+
+1. **Kristian publishes framework-dependent, targeting `net9.0`.** Copy the
+   folder over, run `dotnet HH-2026-WebServer.dll --urls http://0.0.0.0:5148`.
+   A few MB, no download, works with what is already installed today.
+   ⚠️ It must be **net9.0** — `Microsoft.AspNetCore.App` is only present at
+   9.0.10, and .NET does not roll a net8.0 app forward a major version by
+   default.
+2. **Kristian publishes self-contained** (`-r win-x64 --self-contained`).
+   ~70 MB, no runtime dependency at all, copies by USB stick. **This is the one
+   to have on the laptop for demo day**, because it cannot be broken by a
+   runtime mismatch or by Kristian's laptop being elsewhere.
+3. **Install the .NET SDK here** (~200 MB). Worth doing *as well*, because
+   Kristian is iterating on four changes today and re-publishing for each one
+   is friction — with the SDK it is `git pull && dotnet run`.
+   **Download it over campus Wi-Fi or Ethernet, not the hotspot** — the phone
+   is carrying the board's connection and 200 MB of mobile data is a poor
+   trade. Then rejoin the hotspot and re-check the IP.
+
+There is no local checkout of `HH-2026-WebServer` on this machine either, so
+that needs cloning whichever route is taken.
+
+### 4. Flashed and tested — the chain works up to the server 🟡
+
+Full press-to-failure path, on real hardware:
+
+```
+[btn ] A short -> READ  ->  wifi ok  ->  capture 27243 bytes in 136 ms
+  ->  POST /api/tts/fromimage  ->  connection refused  ->  HTTP -1
+  ->  [phr ] no_internet
+```
+
+Everything the device owns works. It is waiting on a server to answer.
 
 ---
 
-## Part 5 — Cloud lane
+## Two live hazards found today
 
-**Owner: 1 SWE.** Your track is done; the highest-value thing you can do today
-is the item with the longest lead time and the one that needs a human with a
-camera.
+**1. The device says "No internet connection" when the *server* is down.**
+`phrase_for_status()` in `main.cpp` maps every transport-level failure — which
+includes *server refused* — to `PH_NO_INTERNET`. Observed today on Wi-Fi at
+RSSI −35. This is D24's failure wearing different clothes: if Kristian's laptop
+sleeps during the showcase, the device blames the network in front of judges.
+A distinct phrase for "cannot reach the server" would fix it, and it is
+blocked on the same voice decision as everything else.
 
-- [ ] 🔴 **Shoot the eval photos.** Zero of them exist —
-      `tools/eval/images/` is empty and `expected.json` has three "FILL ME IN"
-      stubs. **Cut the target from 20 to 10** and weight all ten to the case
-      that actually hurts someone: doses, expiry dates, dollar amounts, bus
-      numbers.
-      - **Real objects, not printouts**: medicine bottles (curved, small print),
-        a glossy laminated menu, a low-contrast utility bill, handwriting, a bus
-        timetable.
-      - **Shoot them through the actual device** once the camera works — the
-        mock saves every upload to `tools/captures/`, which is the easiest way
-        to build the set with the real lens and the real distance.
-      - Fill in the `numbers` and `must_contain` ground truth as you go.
-- [ ] **Run the eval and settle D16.** `python tools/eval/score.py`. The model
-      swap is worth 1.4 s of latency and it's been sitting behind ten
-      photographs. Current headroom for the entire device side is **0.95 s**;
-      the swap takes it to **2.86 s**.
-- [ ] **Add a frontier vision model to `compare_models.py` and re-run the D17
-      hard image.** All four current candidates are budget models
-      (`flash` / `flash-lite`), chosen when cost mattered. It doesn't any more.
-      D18 concluded "no model swap fixes accuracy" from a set that never
-      included a top-tier model. For the one failure mode that could actually
-      hurt someone, that gap is worth closing — four lines and one re-run.
-- [ ] **Once the voice decision lands**, generate the remaining 7 phrases,
-      including the new D17 one: *"I am not certain of this. Try more light, or
-      move closer."*
-      Always `--out-dir` somewhere scratch first and listen before committing.
+**2. Seven of ten phrases are still unrecorded, and the device proves it.**
+
+```
+[phr ] missing: reading describing connecting batt_low error repeating uncertain  (7 of 10)
+[phr ] MISSING 'reading' -- device is silent here.
+```
+
+`error` and `uncertain` are both in that list. **Right now, if the camera
+fails, or the model cannot read the label, the device makes no sound at all** —
+indistinguishable from a flat battery to a user who cannot see it. `CLAUDE.md`
+states "the device must never be silent: every failure path plays a phrase."
+That rule is currently violated on most paths.
 
 ---
 
-## End of day — what good looks like
+## Three things that need people in a room — open since 31 Aug
+
+**All three are still open on day 5.** Everyone is physically present today;
+that is the resource these have been waiting for, and it is not guaranteed
+again before freeze.
+
+- [ ] 🔴 **Voice cloning: Route A or Route B?** Route A = accept the
+      `kyutai/pocket-tts` HF terms and keep D6's one-voice goal. Route B = pick
+      a catalog voice and match the OpenRouter voice to it, reversing D13's
+      ordering. **Both are one flag apart in `make_phrases.py`.** Eight days
+      open, blocking 7 of 10 phrases including the D17 safety warning. Every
+      silent failure path traces back to this one decision.
+- [ ] 🔴 **Book 3–4 user testers.** Phone calls, not messages. Booked later
+      than today and they probably cannot make the date.
+- [ ] 🔴 **Lens refocus + the two diffused LEDs.** D18 says these are the
+      primary accuracy lever, ahead of any model choice, and they are also the
+      fix for the motion blur `camera_tuning.h` is currently working around in
+      software. Five minutes for the lens.
+
+---
+
+## Also landed today
+
+- **`hardware/wiring.md` rewritten for the S3** (D27). It was still the WROVER
+  document: buttons on GPIO 13/15 (which are the camera's PCLK and XCLK here)
+  and I²S on 32/33/14 (not on this header at all). Its "do not use" table
+  called GPIO 16/17 the PSRAM bus when they are camera data lines, and listed
+  GPIO 21 as camera bus when it is button B. `CLAUDE.md` names that file as the
+  live pin map, so anyone wiring from it today would have broken the camera and
+  hunted for the fault in software.
+- **D25** — the parked self-hosted-server question is closed as *adopted*. The
+  firmware for it shipped in `c3aafe9` on 4 Sep while the log still read
+  "nothing has been committed and no firmware has been changed for it."
+- **D26** — `camera_release()` frees its own buffer rather than returning a
+  framebuffer, and why the `pipeline.h` wording was left alone.
+- **The boot banner reports the wrong backend.** Both `USE_MOCK_SERVER` and
+  `USE_LOCAL_SERVER` are `1`; the banner checks the first and prints
+  `MOCK http://172.20.10.4:8080/api/v1`, while the code takes the second to
+  port 5148. One line in `main.cpp`. Not fixed — it is Sam's file.
+
+---
+
+## Measured today
 
 | | |
 |---|---|
-| ✅ **Minimum** | Camera streams in a browser · pin map confirmed and written down · lens refocused · all four decisions made and logged |
-| ✅ **Good** | The above, plus a WAV playing out of the speaker over I²S, and the board POSTing a real photo to the mock |
-| ✅ **Ahead** | Both of those, on battery power, with the day-3 checkpoint hit and ten eval photos shot |
+| JPEG size, SVGA q12, indoor | **27.2 KB** (26.4–27.3 across candidates) |
+| Capture, warm sensor | **136 ms** |
+| Capture, first press incl. lazy init | **254 ms** |
+| Free heap after capture | 251,068 (min 249,260) |
+| Free PSRAM after capture | 8,154,659 of 8,386,019 |
+| Heap across two presses | **no leak** — identical both times |
+| Wi-Fi RSSI on hotspot | −35 |
+| Build | RAM 17.0%, flash 32.1% |
 
-**Standup tomorrow, 15 minutes:** what shipped, what's blocking, has the eval
-score moved.
+---
+
+## Still open, most urgent first
+
+1. 🔴 **The voice-cloning decision.** Day 5. Blocking 7 phrases; makes most
+   failure paths silent, including the D17 safety warning.
+2. 🔴 **Kristian's four server changes** — real prompt from
+   `reference_pipeline.py` `PROMPTS["read"]`, raw int16 PCM not a WAV,
+   `--urls http://0.0.0.0:5148`, real status codes.
+3. 🔴 **Get the server running on this laptop** — `SERVER_BASE_URL` is already
+   correct, but there is no .NET SDK and no checkout here. Fastest route is a
+   framework-dependent `net9.0` publish from Kristian; a self-contained publish
+   is the one to keep for demo day.
+4. 🔴 **Eval photos: still 0 of 10.** Longest lead time in the project. The
+   camera works now, and the mock saves every upload to `tools/captures/`, so
+   the blocker is a human with real objects — after the lens is refocused.
+5. 🔴 **Book the testers.**
+6. **Lens refocus + LEDs.**
+7. **A distinct "cannot reach the server" phrase**, so the device stops
+   blaming the network for a sleeping laptop.
+8. **Settle the ship date** — 14 or 15 Sep.
+9. **Turn Avast back on and fix it properly** — carried from 4 Sep, still
+   listed as left off. If it re-arms as-is, the mock breaks for whoever runs
+   the demo fallback.
+10. `vision.cpp` — unwritten, and only needed if `USE_LOCAL_SERVER` goes to 0.
+11. The 1 Hz waiting tick; offline Repeat by caching PCM in PSRAM.
+
+---
+
+## Previous sessions
+
+Ended sessions move to `docs/sessions/`, so this file is always just today.
+
+- [`docs/sessions/2026-09-04.md`](sessions/2026-09-04.md) — day 1. Button
+  press to speech on real hardware, and the five bugs it cost: wrong board,
+  wrong flash mode, Avast, a one-space JSON mismatch, and the mock announcing
+  "No internet connection" while connected.
 
 ---
 
 ## Reference — commands
 
 ```bash
-# once, before anything else
-python tools/wav_to_phrases.py --emit-header
+cd firmware
+python -m platformio run -e freenove_s3 -t upload --upload-port COM4
+python -m platformio device monitor -b 115200 -p COM4      # CH343 port, D22
 
-# the thing firmware talks to, all day
-python tools/mock_server.py
-
-# check the mock still works after any change to it
-python tools/test_mock.py                       # 21 assertions
-
-# ground truth — if the device disagrees with this, the device is wrong
-python tools/reference_pipeline.py photo.jpg --base-url http://127.0.0.1:8080/api/v1
-python tools/reference_pipeline.py photo.jpg --mode read --text-only   # free, no TTS
-
-# failure injection
-curl -X POST http://localhost:8080/mock/scenario -d scenario=notext
-curl http://localhost:8080/mock/status
+python tools/mock_server.py     # demo-day fallback — keep it working
+python tools/test_mock.py       # 21 conformance assertions
 ```
-
-**Companions:** `00-TEAM-PLAN.md` · `01-HARDWARE.md` · `02-SOFTWARE.md` ·
-`docs/decisions.md` · `docs/measurements.md`
-
----
-
-# What actually happened — 4 Sep, end of day
-
-Written at the end of the day, so plan and outcome sit in one file. Decisions
-went to `docs/decisions.md` (D20-D24); measured numbers to
-`docs/measurements.md`.
-
-## Achieved
-
-**The week-1 milestone, on day 1: a button press produces speech from the
-speaker.** `02-SOFTWARE.md` section 10 set that as the week-1 target.
-
-Proven on real hardware, not just compiled:
-
-| | |
-|---|---|
-| Boot, 8 MB PSRAM, stable heap across every phase | ✅ |
-| Two buttons, four distinct events, no double-fires | ✅ |
-| Wi-Fi association and reconnect | ✅ |
-| Shutter earcon (synthesised, not recorded) | ✅ |
-| Phrase playback from flash via I2S | ✅ |
-| Audio over the network: HTTP -> SSE -> base64 -> sample carry -> I2S | ✅ |
-| State machine including failure paths | ✅ |
-| Camera capture + vision call | ❌ other SWE, still stubbed |
-
-The audio result is exact: **45149 samples received of 45149 sent**, zero
-bytes lost, and no audible clicking. That is the one-byte sample carry across
-chunk boundaries proven correct rather than merely sounding acceptable --
-`02-SOFTWARE.md` section 11.4 warns it otherwise costs an evening.
-
-Measured latency, press to first spoken word: **~4.5 s** (120 ms stub capture
-+ 2.5 s simulated vision + 1.93 s to first audio). Target is under 6 s, so
-about 1.5 s of headroom, which real camera capture and upload will eat into.
-
-## Firmware written today
-
-`buttons.cpp/.h`, `phrase.cpp/.h`, `pipeline.h`, `pipeline_stub.cpp`,
-`camera_tuning.h`, and `main.cpp` (the state machine). RAM 15.3%, flash 30.5%.
-
-The camera/vision half is declared as **weak symbols** in
-`pipeline_stub.cpp`, so when the other SWE's real implementations link, theirs
-win automatically -- no flag, no `#ifdef`, no merge conflict in `main.cpp`.
-Delete the stub file once both are real. The boot banner prints
-`*** STUBBED ***` so nobody demos canned text believing it came from a photo.
-
-## Five bugs found and fixed
-
-Roughly in order of how long each cost:
-
-1. **Wrong board.** The team had moved to an ESP32-S3-WROOM; everything had
-   been compiling as `esp32dev`. Different architecture, and the entire pin
-   map in `01-HARDWARE.md` is wrong for it -- GPIO 13/15 are camera pins now.
-   (D20)
-2. **Wrong flash mode.** `qio_*` hangs the second-stage bootloader *before it
-   prints a single character*. esptool flashes and verifies fine, then total
-   silence and no LED -- indistinguishable from a dead board. Only `dio_opi`
-   works. The tell is a ROM log that reaches `entry 0x...` and stops. (D21)
-3. **Avast.** Two separate failures from one product: TLS interception broke
-   PlatformIO's toolchain downloads, and its firewall silently blocked inbound
-   TCP to the mock. Windows Firewall rules looked perfect and were irrelevant,
-   because Avast registers itself as the system firewall product.
-4. **A one-space JSON mismatch** muted the entire audio path with no error
-   anywhere. (D23)
-5. **The mock announcing "No internet connection"** while connected, because
-   its placeholder audio was a system phrase. A live demo hazard. (D24)
-
-The lesson worth keeping from #2 and #3: **the ROM boot log on the UART port
-is the only place a boot failure is visible.** The OTG port shows nothing,
-because USB-Serial-JTAG stays enumerated whether or not the app boots -- so a
-live COM port proves nothing. Debug on the CH340 port. (D22)
-
-## Still open, most urgent first
-
-1. 🔴 **The voice-cloning decision.** Oldest open item, now blocking 7 of 10
-   phrases -- including D17's uncertainty warning, which is the
-   safety-relevant one. Every failure path is currently silent because of it.
-2. 🔴 **Turn Avast back on, and fix it properly** -- set the hotspot network
-   to Private/Friend in Avast's firewall, or allow `python.exe` inbound.
-   Left off at end of day. If it re-arms as-is the mock breaks again, and it
-   breaks for whoever runs the demo fallback.
-3. 🔴 **Eval photos: 0 of 10.** Longest lead time, needs a human with a
-   camera and real objects, and needs the lens refocused first (D18).
-4. **`camera.cpp` / `vision.cpp`** -- unwritten. `pipeline.h` is the contract.
-5. **Lens refocus and the two diffused LEDs** -- D18 makes these the primary
-   accuracy mechanism, not polish. Also the fix for the reported motion blur.
-6. **Hardware answers to record in `hardware/wiring.md`:** did the ES7148 need
-   MCLK on SCK, and which channel is the speaker on? Audio works with
-   `mclk=-1` and `mono(left)`, which implies "no" and "left", but it was not
-   confirmed explicitly.
-7. **The 1 Hz waiting tick** -- there is a silent ~4.5 s gap. Needs the
-   network work on its own task; best done once `vision_read` is real so it
-   wraps both calls.
-8. **Offline Repeat** -- currently re-calls TTS. Caching PCM in PSRAM is
-   clearly viable with 8 MB free.
-
-## Parked
-
-The self-hosted server idea is recorded as an open question in
-`docs/decisions.md` -- **not decided, and nothing built for it.** It was
-raised late, by someone not on site, at the end of a long day. Revisit when
-the team is together.
