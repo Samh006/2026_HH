@@ -62,7 +62,7 @@ CANNED = {
 }
 
 SCENARIOS = ("ok", "notext", "uncertain", "http500", "timeout", "garbage",
-             "empty")
+             "empty", "upstream")
 state = {"scenario": "ok", "presses": 0}
 
 
@@ -319,6 +319,116 @@ def speech_gone():
                    "does not exist", "code": 400}}), 400
 
 
+# ---------------------------------------------------------------------------
+# Our own ASP.NET server's shape (D25). Everything above this line models
+# OpenRouter, which is the TWO-leg path: device -> vision, device -> TTS.
+#
+# The device does not use that any more. It POSTs a raw JPEG to our own server
+# and gets finished audio back in ONE round trip, and the two shapes have
+# nothing in common -- different path, different body, different encoding,
+# different error channel. So switching USE_LOCAL_SERVER on quietly cost us
+# the demo-day fallback: falling back to this mock would have needed
+# vision.cpp, which nobody has written.
+#
+# This endpoint gives it back, and doubles as the reference implementation for
+# the real server. Run it on the port config.h already points at:
+#
+#     python tools/mock_server.py --port 5148
+#
+# See docs/SERVER_CONTRACT.md for the contract this implements.
+# ---------------------------------------------------------------------------
+
+def check_jpeg_raw(raw):
+    """check_jpeg() for a raw body rather than a base64 data URL.
+
+    The base64 leg is gone on this path, so its failure modes are gone too --
+    but a truncated upload still looks exactly like a working one from the
+    device end, which is the whole reason D11 put this check here.
+    """
+    if not raw:
+        return None, "empty body -- no JPEG posted"
+    if raw[:2] != b"\xff\xd8":
+        return None, ("body does not start with SOI (ffd8), got "
+                      f"{raw[:2].hex()} -- is Content-Type image/jpeg and the "
+                      "body raw bytes, not multipart or base64?")
+    if raw[-2:] != b"\xff\xd9":
+        return None, (f"received {len(raw)}B but no EOI (ffd9) at the end -- "
+                      "the upload is truncated")
+    return {"bytes": raw, "dims": jpeg_dims(raw)}, None
+
+
+def wav_header(n_bytes, rate=SAMPLE_RATE, channels=1, bits=16):
+    """A canonical 44-byte RIFF/WAVE header.
+
+    24 kHz mono 16-bit, because that is what the device needs: it has no
+    resampler (it warns and plays at the wrong speed) and it never
+    de-interleaves, so stereo plays as noise at double rate with no error.
+    """
+    block = channels * bits // 8
+    return b"".join((
+        b"RIFF", struct.pack("<I", 36 + n_bytes), b"WAVE",
+        b"fmt ", struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                             rate * block, block, bits),
+        b"data", struct.pack("<I", n_bytes),
+    ))
+
+
+@app.post("/api/tts/fromimage")
+def tts_from_image():
+    state["presses"] += 1
+    scenario = state["scenario"]
+    log(f"--- press #{state['presses']}  /api/tts/fromimage  "
+        f"scenario={scenario}")
+
+    ctype = request.headers.get("Content-Type", "")
+    if "image/jpeg" not in ctype:
+        log(f"  ! Content-Type is {ctype!r}, expected image/jpeg")
+
+    raw = request.get_data() or b""
+    info, err = check_jpeg_raw(raw)
+    if err:
+        log(f"  ! {err}")
+        return jsonify({"error": err}), 400
+    log(f"  jpeg {len(raw)}B {info['dims']} -> {save_capture(raw)}")
+
+    # Failure injection. The status code IS the error message on this path --
+    # the device never sees a response body, so these are the only things it
+    # can tell the user apart by.
+    if scenario == "http500":
+        return jsonify({"error": "injected 500"}), 500
+    if scenario == "upstream":
+        return jsonify({"error": "could not reach OpenRouter"}), 503
+    if scenario == "notext":
+        # 422, and deliberately NO audio: the device plays its own recorded
+        # "I could not find any text" phrase. Sending the literal word NOTEXT
+        # to a TTS engine costs money and sounds like a malfunction.
+        return jsonify({"error": "no legible text in image"}), 422
+    if scenario == "timeout":
+        time.sleep(40)                      # past SERVER_TIMEOUT_MS
+        return Response(b"", mimetype="audio/wav")
+    if scenario == "garbage":
+        return Response(b"<html>not audio</html>", mimetype="audio/wav")
+    if scenario == "empty":
+        return Response(b"", mimetype="audio/wav")
+
+    # The real server does a vision call AND synthesis before it answers a
+    # byte, and it does not stream. Imitating that keeps our latency numbers
+    # honest -- DO NOT REMOVE.
+    time.sleep(VISION_DELAY_S)
+
+    pcm, source = load_pcm()
+    # Default WAV, because that is what the real server sends today and it is
+    # the branch of sniff_wav() that had never been exercised. ?format=pcm
+    # exercises the bare-PCM branch, which is the other thing it must handle.
+    bare = request.args.get("format") == "pcm"
+    body = pcm if bare else wav_header(len(pcm)) + pcm
+    log(f"  -> 200 {'bare PCM' if bare else 'WAV'} {len(body)}B  "
+        f"{len(pcm) // 2} samples = {len(pcm) / 2 / SAMPLE_RATE:.2f}s  "
+        f"[{source}]")
+    return Response(body, mimetype="audio/wav",
+                    headers={"Content-Length": str(len(body))})
+
+
 @app.post("/mock/scenario")
 def set_scenario():
     want = (request.form.get("scenario")
@@ -336,14 +446,46 @@ def status():
 
 
 if __name__ == "__main__":
+    import argparse
+    import socket
+
+    ap = argparse.ArgumentParser(
+        description="Mock backend: fake OpenRouter AND our ASP.NET shape.")
+    ap.add_argument("--port", type=int, default=PORT,
+                    help="default 8080. Use --port 5148 to stand in for the "
+                         "ASP.NET server on the port config.h already points "
+                         "at, so no reflash is needed.")
+    ap.add_argument("--host", default=HOST)
+    args = ap.parse_args()
+
+    # NOT gethostbyname(gethostname()) -- on a laptop with a VPN or a WSL
+    # adapter that returns whichever interface Windows feels like, and
+    # printing the wrong one here sends someone off to debug a device that
+    # was never pointed at the right address. Ask the routing table which
+    # interface actually reaches the phone hotspot instead.
+    def outbound_ip():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))     # no packet is sent; this just
+            return s.getsockname()[0]      # picks the outbound interface
+        except Exception:
+            return "<this laptop>"
+        finally:
+            s.close()
+
+    lan = outbound_ip()
+
     _, source = load_pcm()
-    print("mock_server.py -- fake OpenRouter, matching the REAL API shape (D14)")
+    print("mock_server.py -- fake OpenRouter (D14) + our ASP.NET shape (D25)")
     print(f"audio source : {source}")
     print(f"scenarios    : {', '.join(SCENARIOS)}  (POST /mock/scenario)")
     print(f"captures     : {CAPTURE_DIR}/")
-    print("speech       : /chat/completions + modalities:[text,audio] + "
-          "stream:true  -> SSE base64")
+    print("one-shot     : POST /api/tts/fromimage  <- raw JPEG in, audio out")
+    print("               24 kHz mono WAV; add ?format=pcm for bare PCM")
+    print("two-leg      : /chat/completions + modalities:[text,audio] + "
+          "stream:true -> SSE base64")
     print("             : /audio/speech returns 400, exactly like the real API")
-    print(f"listening on : http://{HOST}:{PORT}/api/v1")
-    print("               ^ point firmware at the LAN IP, not 127.0.0.1\n")
-    app.run(host=HOST, port=PORT, threaded=True)
+    print(f"listening on : http://{args.host}:{args.port}")
+    print(f"device wants : http://{lan}:{args.port}  <- must match "
+          "SERVER_BASE_URL in config.h, and never 127.0.0.1\n")
+    app.run(host=args.host, port=args.port, threaded=True)
