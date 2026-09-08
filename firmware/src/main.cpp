@@ -21,6 +21,7 @@
 #include "config.h"
 #include "phrase.h"
 #include "pipeline.h"
+#include "reader.h"
 #include "speech.h"
 
 namespace {
@@ -96,6 +97,28 @@ void speak_result(const char *text) {
     audio_drain();
 }
 
+// Our server's HTTP status is the only thing the device learns about a
+// failure on the one-round-trip path, so the mapping IS the error handling.
+// Negative values are HTTPClient transport errors, not server responses.
+PhraseId phrase_for_status(int status) {
+    if (status <= 0) {
+        return PH_NO_INTERNET;      // never reached the server at all
+    }
+    switch (status) {
+        case 422: return PH_NO_TEXT;      // read fine, nothing legible in it
+        case 502:
+        case 503: return PH_NO_INTERNET;  // server could not reach OpenRouter
+        default:  return PH_ERROR;
+    }
+    // NOTE: uncertainty (D17) is deliberately NOT a status code here. A
+    // non-200 makes this path play a phrase and skip the audio entirely --
+    // so returning 409 for "the numbers might be wrong" would suppress the
+    // very reading the user asked for. The server folds the warning into the
+    // speech it generates instead, which also works today while PH_UNCERTAIN
+    // is still unrecorded. If we later want it in the recorded voice, add a
+    // response header and play the phrase before streaming the 200 body.
+}
+
 void handle(Mode mode) {
     log_heap("press");
 
@@ -124,6 +147,24 @@ void handle(Mode mode) {
     Serial.printf("[stm ] captured %u bytes\n", (unsigned)jpeg_len);
     log_heap("after capture");
 
+#if USE_LOCAL_SERVER
+    // 3+4. One round trip: the server does vision AND speech, and hands back
+    // audio. The device never sees the transcript, so NOTEXT and D17's
+    // UNCLEAR handling both have to live server-side -- the status code is the
+    // only channel it has to tell us which failure happened.
+    g_state = ST_VISION;
+    const ReadStats rs = read_aloud(jpeg, jpeg_len, mode);
+    camera_release();
+    log_heap("after read_aloud");
+
+    if (!rs.ok && rs.samples == 0) {
+        earcon_error();
+        phrase_play(phrase_for_status(rs.http_status));
+    }
+    audio_drain();
+    g_state = ST_IDLE;
+    return;
+#else
     // 3. Vision.
     g_state = ST_VISION;
     char text[TEXT_MAX];
@@ -156,6 +197,7 @@ void handle(Mode mode) {
     speak_result(text);
     log_heap("after speech");
     g_state = ST_IDLE;
+#endif  // USE_LOCAL_SERVER
 }
 
 void handle_repeat() {
