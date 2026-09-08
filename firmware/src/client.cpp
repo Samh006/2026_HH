@@ -3,7 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 
-std::vector<uint8_t> send_jpeg(const char* server_url, const uint8_t* jpeg, size_t jpeg_size) {
+std::tuple<int, std::vector<uint8_t>> send_jpeg(const char* server_url, const uint8_t* jpeg, size_t jpeg_size) {
     String url = String(server_url) + "/api/tts/fromimage";
     HTTPClient http;
 
@@ -15,10 +15,10 @@ std::vector<uint8_t> send_jpeg(const char* server_url, const uint8_t* jpeg, size
 
     int status = http.POST(const_cast<uint8_t*>(jpeg), jpeg_size);
 
-    // Current catch-all error handling, swap this out for more specific error handling
+    // returns early when status code indicates an error
     if (status != 200) {
         http.end();
-        throw std::runtime_error("Server returned an error");
+        return {status, {}};
     }
 
     int response_length = http.getSize();
@@ -44,5 +44,5 @@ std::vector<uint8_t> send_jpeg(const char* server_url, const uint8_t* jpeg, size
 
     http.end();
 
-    return wav;
+    return {status, std::move(wav)};
 }
