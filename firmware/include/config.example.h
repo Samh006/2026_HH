@@ -94,6 +94,21 @@
 #define BTN_LONGPRESS_MS 700
 
 // ── Camera ──────────────────────────────────────────────────────────────
-// Try SVGA/q12 before reaching for UXGA — biggest latency lever we have.
-#define CAM_FRAMESIZE   FRAMESIZE_SVGA
+// Measured 8 Sep on a printed box, same scene at all three sizes:
+//
+//   SVGA  800x600    17 KB   113 ms   barcode digits GONE, small print a smear
+//   UXGA  1600x1200  62 KB   274 ms   marginal -- readable only if you guess
+//   QXGA  2048x1536  99 KB   345 ms   clean: "X0012KN531", "FNK0082" both read
+//
+// This line used to say "try SVGA/q12 before reaching for UXGA -- biggest
+// latency lever we have", which was a fair guess before anything was measured.
+// It was wrong in both halves. The small print on a real label is about four
+// pixels tall at SVGA, and nothing downstream recovers four pixels -- not a
+// better model, not a better prompt. And the latency it was protecting turns
+// out to be affordable: the whole device side of a press is ~217 ms against a
+// budget of roughly 5.5 s, so +232 ms buys text that otherwise does not exist
+// in the file at any price. See D28.
+//
+// QXGA is the OV3660's native 3 MP. Anything above it is interpolated.
+#define CAM_FRAMESIZE   FRAMESIZE_QXGA
 #define CAM_JPEG_QUALITY 12
