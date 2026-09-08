@@ -157,18 +157,27 @@ That rule is currently violated on most paths.
 that is the resource these have been waiting for, and it is not guaranteed
 again before freeze.
 
-- [ ] 🔴 **Voice cloning: Route A or Route B?** Route A = accept the
-      `kyutai/pocket-tts` HF terms and keep D6's one-voice goal. Route B = pick
-      a catalog voice and match the OpenRouter voice to it, reversing D13's
-      ordering. **Both are one flag apart in `make_phrases.py`.** Eight days
-      open, blocking 7 of 10 phrases including the D17 safety warning. Every
-      silent failure path traces back to this one decision.
+- [x] ~~**Voice cloning: Route A or Route B?**~~ **The question is
+      obsolete.** A and B both assumed the cloud voice came from OpenRouter's
+      `gpt-audio-mini`. It doesn't any more — Kristian's server synthesises
+      with **Kokoro** (`config.h:117`, `reader.h:41`). So generate all 10
+      phrases with Kokoro using the same voice the server uses: same engine,
+      same voice, no cloning, no HF gate. **Remaining action: ask Kristian
+      which Kokoro voice he has configured.** An eight-day blocker that
+      dissolved because the architecture moved underneath it and nobody
+      re-examined the decision.
 - [ ] 🔴 **Book 3–4 user testers.** Phone calls, not messages. Booked later
       than today and they probably cannot make the date.
-- [ ] 🔴 **Lens refocus + the two diffused LEDs.** D18 says these are the
-      primary accuracy lever, ahead of any model choice, and they are also the
-      fix for the motion blur `camera_tuning.h` is currently working around in
-      software. Five minutes for the lens.
+- [ ] 🔴 **The two diffused LEDs** — one either side of the lens, not one
+      (a single source shadows raised label text), diffused with a scrap of
+      white PETG (a bare LED puts a specular hotspot exactly where the text
+      is). ~20 mA each, on during capture only, GPIO **39** is free.
+      **Every frame today came out underexposed**, and `CAM_AE_LEVEL -1`
+      deliberately makes that worse to buy back motion blur — add light and
+      that trade disappears.
+- [x] ~~**Lens refocus**~~ — **de-prioritised by evidence.** "Starter Kit" came
+      out crisp at every frame size, so focus is acceptable. Still worth a
+      check on a curved bottle at 15–20 cm, but it is no longer a 🔴.
 
 ---
 
@@ -195,15 +204,37 @@ again before freeze.
 
 ## Measured today
 
-| | |
+### Frame size sweep — same scene, three sizes (D28)
+
+| Size | Dims | JPEG | Capture | Small print |
+|---|---|---|---|---|
+| SVGA | 800×600 | 17 KB | 113 ms | **absent** — ~4 px per character |
+| UXGA | 1600×1200 | 62 KB | 274 ms | marginal |
+| **QXGA** | **2048×1536** | **99 KB** | **345 ms** | **clean** — `X0012KN531`, `FNK0082` |
+
+**Now shipping QXGA.** The SVGA failure was under-sampling, not blur, which is
+why no model or prompt change could ever have fixed it.
+
+### End to end, before and after the change
+
+| | SVGA | QXGA |
+|---|---|---|
+| JPEG | 27 KB | **137 KB** (scene-dependent; budget 150–200 KB) |
+| Capture | 136 ms | **554 ms** |
+| Time to first audio | 2717 ms | **3358 ms** |
+| …minus the mock's fake 2.5 s = device-side | 217 ms | **858 ms** |
+| Samples played | 151566 / 151566 | 151566 / 151566 |
+| Free PSRAM after capture | 8.15 MB | **6.98 MB** |
+| Heap across presses | no leak | **no leak** |
+
+Device-side is now the second-largest thing on the clock after the server.
+Fine against a 6 s target **provided the server answers within ~5 s**.
+`CAM_SHARPEST_OF` 3 → 2 buys back ~110 ms if needed, out of the motion-blur
+defence.
+
+| Other | |
 |---|---|
-| JPEG size, SVGA q12, indoor | **27.2 KB** (26.4–27.3 across candidates) |
-| Capture, warm sensor | **136 ms** |
-| Capture, first press incl. lazy init | **254 ms** |
-| Free heap after capture | 251,068 (min 249,260) |
-| Free PSRAM after capture | 8,154,659 of 8,386,019 |
-| Heap across two presses | **no leak** — identical both times |
-| Wi-Fi RSSI on hotspot | −35 |
+| Wi-Fi RSSI on hotspot | −35 to −46 |
 | Build | RAM 17.0%, flash 32.1% |
 
 ---
