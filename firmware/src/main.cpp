@@ -18,6 +18,7 @@
 
 #include "audio.h"
 #include "buttons.h"
+#include "client.h"
 #include "config.h"
 #include "phrase.h"
 #include "pipeline.h"
@@ -153,13 +154,50 @@ void handle(Mode mode) {
     // UNCLEAR handling both have to live server-side -- the status code is the
     // only channel it has to tell us which failure happened.
     g_state = ST_VISION;
-    const ReadStats rs = read_aloud(jpeg, jpeg_len, mode);
-    camera_release();
-    log_heap("after read_aloud");
 
-    if (!rs.ok && rs.samples == 0) {
+    // Transport lives in client.cpp now; this file only decides what the user
+    // hears. Note send_jpeg() buffers the WHOLE reply before returning, where
+    // the old path streamed it into I2S as it arrived -- so nothing is
+    // audible until the download finishes. That serialises two things that
+    // used to overlap; watch the gap between these two log lines.
+    int status = -1;
+    std::vector<uint8_t> wav;
+    const uint32_t t_send = millis();
+    try {
+        const std::tuple<int, std::vector<uint8_t> > reply =
+            send_jpeg(SERVER_BASE_URL, jpeg, jpeg_len);
+        status = std::get<0>(reply);
+        wav = std::get<1>(reply);
+    } catch (const std::exception &e) {
+        // send_jpeg throws if http.begin() fails. Uncaught, that is
+        // std::terminate -> abort -> reboot, which on demo day looks like the
+        // device dying in someone's hand. A transport failure has to sound
+        // like every other transport failure instead.
+        Serial.printf("[stm ] send_jpeg threw: %s\n", e.what());
+        status = -1;
+    }
+    camera_release();
+    // This is the whole cost of the buffered design: the user hears nothing
+    // for all of it. The old streaming path started playing partway through
+    // the download instead, so this number used to be mostly hidden. It is
+    // the second-largest thing on the clock after the server's own work --
+    // print it every press rather than inferring it from heap lines.
+    Serial.printf("[stm ] send_jpeg %lu ms (%u bytes up, %u down) -- silent "
+                  "the whole time\n", (unsigned long)(millis() - t_send),
+                  (unsigned)jpeg_len, (unsigned)wav.size());
+    log_heap("after send_jpeg");
+
+    if (status != 200) {
+        Serial.printf("[stm ] server said %d\n", status);
         earcon_error();
-        phrase_play(phrase_for_status(rs.http_status));
+        phrase_play(phrase_for_status(status));   // mapping unchanged
+    } else {
+        const ReadStats rs = read_aloud(wav.data(), wav.size());
+        if (!rs.ok && rs.samples == 0) {
+            Serial.println("[stm ] HTTP 200 but nothing played");
+            earcon_error();
+            phrase_play(PH_ERROR);
+        }
     }
     audio_drain();
     g_state = ST_IDLE;
