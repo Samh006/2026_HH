@@ -230,14 +230,3 @@ void camera_release() {
     g_frame = nullptr;
 }
 
-#if USE_LOCAL_SERVER
-// On the one-round-trip path main.cpp never calls vision_read() -- the server
-// does vision and speech together and hands back audio. So with a real camera
-// there is no stub left in the path, and the boot banner should stop saying
-// there is. It is a real photo now.
-//
-// Deliberately NOT defined when USE_LOCAL_SERVER is 0: that path does call
-// vision_read(), vision.cpp is still unwritten, and the weak stub in
-// pipeline_stub.cpp correctly keeps reporting stubbed.
-bool pipeline_is_stubbed() { return false; }
-#endif

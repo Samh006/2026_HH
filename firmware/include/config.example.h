@@ -1,5 +1,9 @@
 // config.example.h — COPY THIS TO config.h AND FILL IT IN.
 //
+// Regenerated from a working config.h on 17 Sep. There is no API key in
+// here any more and there should never be one again: the server holds it
+// and the device never talks to OpenRouter directly.
+//
 //   cp firmware/include/config.example.h firmware/src/config.h
 //
 // config.h is gitignored (see .gitignore). This file is the committed template:
@@ -10,76 +14,23 @@
 // Two networks, tried in order. Venue Wi-Fi with a captive portal will
 // silently break TLS, so entries 1 and 2 should be PHONE HOTSPOTS for the
 // demo — not the venue's guest network. See 02-SOFTWARE.md §11.5
-#define WIFI_SSID_1     "hotspot-one"
+#define WIFI_SSID_1     "your-hotspot"
 #define WIFI_PASS_1     "password"
-#define WIFI_SSID_2     "hotspot-two"
+#define WIFI_SSID_2     "backup-hotspot"
 #define WIFI_PASS_2     "password"
 #define WIFI_TIMEOUT_MS 15000
 
-// ── Backend selection ───────────────────────────────────────────────────
-// 1 = laptop mock over plain HTTP (weeks 1+, and the demo-day fallback)
-// 0 = real OpenRouter over TLS (week 2 onward)
-#define USE_MOCK_SERVER 1
-
-// Mock: plain HTTP is deliberate. Do not add TLS here — the mock exists so
-// the request/response loop is proven before TLS enters the picture.
-// Set this to the laptop's LAN IP; the ESP32 cannot reach 127.0.0.1.
-// PLACEHOLDER -- put YOUR laptop's LAN IP here. The mock prints it in its
-// startup banner. Not 127.0.0.1: the ESP32 cannot reach that.
-#define MOCK_BASE_URL   "http://192.168.1.100:8080/api/v1"
-
-// Real API. HTTPS is not optional — OpenRouter serves no http:// endpoint.
-// We are the client, so there is no certificate for us to obtain; we only
-// skip *validating* theirs via client.setInsecure(). See 02-SOFTWARE.md §6.1
-#define OR_BASE_URL     "https://openrouter.ai/api/v1"
-#define OR_API_KEY      "sk-or-v1-REPLACE-ME"   // ← never commit this
-
-// ── Models ──────────────────────────────────────────────────────────────
-// D16 measured gemini-3.5-flash-lite at 1.4 s faster and 37% cheaper for the
-// same accuracy, but says do not switch on synthetic images alone. Confirm on
-// the 20-photo eval set first, then change this line.
-#define VISION_MODEL    "google/gemini-3-flash-preview"
-#define VISION_MAX_TOK  400
-
-// ── Speech (D14 — read this before writing net.cpp) ─────────────────────
-// There is NO /audio/speech endpoint on OpenRouter and NO response_format:
-// pcm. Both return 400. Of 396 models only gpt-audio and gpt-audio-mini emit
-// speech, and they do it through /chat/completions:
-//
-//   POST /chat/completions
-//   { "model": TTS_MODEL, "stream": true,          ← audio is refused without it
-//     "modalities": ["text","audio"],
-//     "audio": { "voice": TTS_VOICE, "format": TTS_AUDIO_FORMAT },
-//     "messages": [{ "role":"user", "content": "<text to speak>" }] }
-//
-// Audio comes back base64-encoded inside SSE deltas at
-// choices[0].delta.audio.data — not as a raw body. So the device needs SSE
-// line framing plus a base64 decoder. Each delta is independently padded, so
-// it decodes standalone; keep a ONE-BYTE CARRY across deltas so a 16-bit
-// sample is never split across an i2s_write(). See tools/reference_pipeline.py
-// tts(), which is the working reference.
-#define TTS_MODEL       "openai/gpt-audio-mini"
-#define TTS_VOICE       "alloy"        // must match the phrase-bank voice
-#define TTS_AUDIO_FORMAT "pcm16"
-
-// ── Audio / pins ────────────────────────────────────────────────────────
-// ESP32-S3-WROOM pin map (D20). NOT the WROVER map in 01-HARDWARE.md sect 2,
-// which is now wrong for our hardware:
-//   * GPIO 32/33 DO NOT EXIST on this board's header
-//   * GPIO 13/15 are the camera's PCLK and XCLK -- a button there fights
-//     the camera
-//   * GPIO 35/36/37 are the PSRAM bus, 19/20 are native USB, 48 is the RGB
-//     LED, and 0/3/45/46 are strapping pins
-// Confirmed map and the reasoning: hardware/wiring.md
 // ── Audio ───────────────────────────────────────────────────────────────
-// 24 kHz 16-bit mono headerless — CONFIRMED against the live API (D15) and
-// matching the Messages/*.wav headers. No longer an open question.
+// The rate the I2S peripheral runs at, and therefore the rate the server
+// MUST send. There is no resampler on the device: the wrong rate plays at
+// the wrong speed, and stereo plays as noise with no error anywhere.
+// Confirmed against a live server response on 17 Sep (D15).
 #define TTS_SAMPLE_RATE 24000
 #define I2S_BCK_PIN     42
 #define I2S_LCK_PIN     41
 #define I2S_DIN_PIN     40
-#define I2S_MCLK_PIN    -1   // -> 39 if the ES7148 needs MCLK. Any GPIO
-                             // works on S3, unlike the classic ESP32
+#define I2S_MCLK_PIN    -1   // -> 39 if the ES7148 needs MCLK. Any
+                             // GPIO works on S3, unlike classic ESP32   // GPIO 0 only if the ES7148 needs MCLK (HW day 2)
 
 // Speaker channel -- the other half of the day-2 hardware question.
 // 0 = mono, left channel only. Start here.
@@ -112,3 +63,72 @@
 // QXGA is the OV3660's native 3 MP. Anything above it is interpolated.
 #define CAM_FRAMESIZE   FRAMESIZE_QXGA
 #define CAM_JPEG_QUALITY 12
+
+// ---- Motion blur / OV3660 ----------------------------------------------
+// Two frame buffers with GRAB_LATEST, not one with GRAB_WHEN_EMPTY. The
+// driver header is explicit: WHEN_EMPTY means "the first fb_count frames
+// might be old", so with a single buffer a press can return a frame exposed
+// while the hand was still moving. That is the "sometimes clean, sometimes
+// blurry" pattern -- not a gradient, a stale frame. At SVGA JPEG a second
+// buffer costs tens of KB of PSRAM, of which we have 4 MB.
+#define CAM_FB_COUNT    2
+
+// Frames grabbed and thrown away after the shutter before keeping one.
+// Covers AEC/AWB convergence AND the moment of hand movement on the press.
+#define CAM_DISCARD_FRAMES 2
+
+// Of this many candidates, keep the LARGEST JPEG. At fixed quality a blurrier
+// frame holds less high-frequency detail and compresses smaller, so file size
+// is a free sharpness proxy -- no decode, no maths. Set to 1 to disable.
+#define CAM_SHARPEST_OF 3
+
+// Bias auto-exposure SHORTER and let gain make up the light. A noisy sharp
+// frame reads far better than a clean blurry one: the VLM tolerates sensor
+// noise well and tolerates motion blur very badly. -2 is the shortest.
+#define CAM_AE_LEVEL    -1
+#define CAM_GAINCEILING GAINCEILING_16X
+
+// OV3660 only. Its 3 MP pixels are smaller than the OV2640's 2 MP ones, so it
+// needs MORE light for the same exposure -- which is why swapping sensors made
+// motion blur worse, not better. Denoise cleans up the extra gain noise.
+#define CAM_DENOISE     4
+#define CAM_SHARPNESS   2
+
+// ---- Offline Repeat ----------------------------------------------------
+// Button B long replays the last reading from PSRAM with NO network at all --
+// no server, no capture, no second API call. That is the one feature that
+// still works when the laptop is asleep and the Wi-Fi is down, and it is the
+// demo beat worth rehearsing: pull the network, press B long, hear it again.
+//
+// 30 s at 24 kHz 16-bit mono = 1.44 MB, against ~7 MB of PSRAM free after a
+// QXGA capture. Measured server replies run 1.6-17.5 s, so this has real
+// headroom. Allocated once at boot and never freed: a per-press allocation is
+// a failure path that first shows up at press seven, in front of judges.
+#define REPEAT_CACHE_SECONDS 30
+
+// ---- The server (HH-2026-WebServer) -------------------------------------
+// ONE round trip: POST the raw JPEG, get finished audio back. The server does
+// the vision call AND the text-to-speech, so the device never does TLS, never
+// needs a base64 encoder, never parses SSE, and -- the part that matters --
+// NEVER HOLDS AN API KEY. 00-TEAM-PLAN.md section 9 named "API key sits in
+// flash" as a known limitation we would have to own in the writeup; adopting
+// the server removed it, and this cleanup (17 Sep) is where it actually left
+// the firmware. Do not add one back.
+//
+// ASP.NET's default profile binds to localhost, which the ESP32 CANNOT reach.
+// It must be started with:  dotnet run --urls http://0.0.0.0:5148
+//
+// This address is a DHCP lease. Re-check it with ipconfig on the SERVER's
+// machine after any network switch -- a stale address here looks exactly like
+// a dead server and costs a reflash. It has already bitten us twice.
+#define SERVER_BASE_URL      "http://192.168.1.100:5148"  // <- the SERVER machine
+#define SERVER_READ_PATH     "/api/tts/fromimage"
+#define SERVER_SUMMARISE_PATH "/api/tts/fromimage"   // one endpoint for now
+#define SERVER_DESCRIBE_PATH  "/api/tts/fromimage"
+
+// Generous: the server does a vision call AND local Kokoro synthesis before it
+// answers a single header byte, and it does not stream. Measured 17 Sep:
+// 7.6 s on a real press, 13.85 s on a text-heavy image. HTTPClient's own
+// default is 5 s, which is NOT enough -- client.cpp must apply this or the
+// device gives up before the server answers and blames the network.
+#define SERVER_TIMEOUT_MS 30000

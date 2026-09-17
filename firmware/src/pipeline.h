@@ -1,14 +1,13 @@
-// pipeline.h -- the seam between the two firmware halves.
+// pipeline.h -- the camera seam.
 //
-// The other SWE owns camera.cpp and vision.cpp and implements these two
-// functions. This file is the contract; agree it once and both halves can be
-// written in parallel without either waiting.
+// This was the contract between the two firmware halves while camera.cpp and
+// vision.cpp were being written in parallel, with pipeline_stub.cpp providing
+// weak definitions so main.cpp could link before either existed.
 //
-// pipeline_stub.cpp provides WEAK definitions of both, so main.cpp links and
-// the state machine runs end to end today. When the real camera.cpp and
-// vision.cpp land, their strong definitions win at link time automatically --
-// no #ifdef, no flag to flip, no merge conflict. Delete the stub file once
-// both are real.
+// Both of those are gone now (17 Sep). camera.cpp is real and confirmed on
+// silicon; vision.cpp was never needed, because the server does the vision
+// call and returns finished audio in one round trip. So all that survives is
+// the camera's two functions and the Mode enum.
 #pragma once
 
 #include <stddef.h>
@@ -37,12 +36,3 @@ inline const char *mode_name(Mode m) {
 bool camera_capture(const uint8_t **jpeg, size_t *len);
 void camera_release();
 
-// Upload the JPEG and get the transcription back. `out` is NUL-terminated and
-// never longer than out_sz-1. Returns false on any network or API failure --
-// the caller speaks an error phrase, it never fails silently.
-bool vision_read(const uint8_t *jpeg, size_t len, Mode mode,
-                 char *out, size_t out_sz);
-
-// True when the stub implementations are in use, so the banner can say so and
-// nobody demos a canned string thinking it came from the camera.
-bool pipeline_is_stubbed();

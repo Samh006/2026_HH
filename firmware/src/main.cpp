@@ -23,7 +23,6 @@
 #include "phrase.h"
 #include "pipeline.h"
 #include "reader.h"
-#include "speech.h"
 
 namespace {
 
@@ -32,12 +31,6 @@ enum State : uint8_t {
 };
 
 State g_state = ST_IDLE;
-
-// Last result, for Repeat. Lives in PSRAM-free internal RAM: 1 KB is cheap and
-// Repeat must work with no network at all.
-constexpr size_t TEXT_MAX = 1024;
-char g_last_text[TEXT_MAX] = {0};
-bool g_have_last = false;
 
 void log_heap(const char *phase) {
     Serial.printf("[heap] %-22s free=%7u  min=%7u  largest=%7u  psram=%8u\n",
@@ -72,32 +65,6 @@ bool wifi_connect() {
     return false;
 }
 
-// D17: models confidently invent digits on a hard image rather than abstain.
-// The prompt now asks them to mark what they cannot read, and the device has
-// to actually voice that doubt -- a silent [?] is worse than useless to
-// someone who cannot check the label themselves.
-bool text_is_uncertain(const char *s) {
-    return strstr(s, "UNCLEAR") != nullptr || strstr(s, "[?]") != nullptr;
-}
-
-void speak_result(const char *text) {
-    g_state = ST_SPEAKING;
-
-    if (text_is_uncertain(text)) {
-        Serial.println("[stm ] uncertainty markers present -- warning first");
-        phrase_play(PH_UNCERTAIN);
-    }
-
-    const SpeechStats st = speech_say(text);
-    if (!st.ok && st.samples == 0) {
-        // Nothing came out at all. That is a failure path, so it speaks.
-        Serial.println("[stm ] TTS produced no audio");
-        earcon_error();
-        phrase_play(PH_ERROR);
-    }
-    audio_drain();
-}
-
 // Our server's HTTP status is the only thing the device learns about a
 // failure on the one-round-trip path, so the mapping IS the error handling.
 // Negative values are HTTPClient transport errors, not server responses.
@@ -122,6 +89,10 @@ PhraseId phrase_for_status(int status) {
 
 void handle(Mode mode) {
     log_heap("press");
+
+    // The old reading stops being true the moment the user points the
+    // device somewhere else. Clear it FIRST -- see repeat_clear().
+    repeat_clear();
 
     // 1. Immediate physical confirmation, before anything slow.
     earcon_shutter();
@@ -148,7 +119,6 @@ void handle(Mode mode) {
     Serial.printf("[stm ] captured %u bytes\n", (unsigned)jpeg_len);
     log_heap("after capture");
 
-#if USE_LOCAL_SERVER
     // 3+4. One round trip: the server does vision AND speech, and hands back
     // audio. The device never sees the transcript, so NOTEXT and D17's
     // UNCLEAR handling both have to live server-side -- the status code is the
@@ -201,55 +171,28 @@ void handle(Mode mode) {
     }
     audio_drain();
     g_state = ST_IDLE;
-    return;
-#else
-    // 3. Vision.
-    g_state = ST_VISION;
-    char text[TEXT_MAX];
-    const bool got = vision_read(jpeg, jpeg_len, mode, text, sizeof(text));
-    camera_release();
-    log_heap("after vision");
+}
 
-    if (!got) {
-        Serial.println("[stm ] vision failed");
+void handle_repeat() {
+    // Offline by construction: the cache holds decoded PCM, so this touches
+    // no network, makes no API call and takes no photo. It is the one thing
+    // that still works when everything else is down.
+    if (!repeat_have()) {
+        // NOT PH_NO_TEXT. "Nothing found. Try moving closer." is a statement
+        // about the last PHOTO; this is a statement about the device's
+        // MEMORY. Saying the first when you mean the second tells a user who
+        // cannot check the label that their reading failed when it did not --
+        // which is exactly the bug this replaces.
+        Serial.println("[stm ] repeat: nothing cached");
         earcon_error();
         phrase_play(PH_ERROR);
         g_state = ST_IDLE;
         return;
     }
-
-    // NOTEXT is handled here, on the device, with a recorded phrase. Sending
-    // it to TTS would cost money and sound like a malfunction.
-    if (strcmp(text, "NOTEXT") == 0) {
-        Serial.println("[stm ] NOTEXT");
-        phrase_play(PH_NO_TEXT);
-        g_state = ST_IDLE;
-        return;
-    }
-
-    strncpy(g_last_text, text, TEXT_MAX - 1);
-    g_last_text[TEXT_MAX - 1] = '\0';
-    g_have_last = true;
-
-    // 4. Speak.
-    speak_result(text);
-    log_heap("after speech");
-    g_state = ST_IDLE;
-#endif  // USE_LOCAL_SERVER
-}
-
-void handle_repeat() {
-    if (!g_have_last) {
-        Serial.println("[stm ] repeat with nothing cached");
-        phrase_play(PH_NO_TEXT);
-        return;
-    }
+    g_state = ST_SPEAKING;
     phrase_play(PH_REPEATING);
-    // Note: this still calls TTS. Caching the PCM rather than the text would
-    // make Repeat work fully offline, which the plan wants -- but 20 s of
-    // audio is ~1 MB, so it has to live in PSRAM. Worth doing once the happy
-    // path is proven.
-    speak_result(g_last_text);
+    repeat_play();
+    audio_drain();
     g_state = ST_IDLE;
 }
 
@@ -266,15 +209,12 @@ void setup() {
                   ESP.getChipRevision(), getCpuFrequencyMhz());
     Serial.printf("  psram   : %u KB%s\n", (unsigned)(ESP.getPsramSize() / 1024),
                   ESP.getPsramSize() ? "" : "   <-- MISSING, camera will fail");
-    Serial.printf("  backend : %s\n",
-                  USE_MOCK_SERVER ? "MOCK " MOCK_BASE_URL : "OpenRouter (TLS)");
-    if (pipeline_is_stubbed()) {
-        Serial.println("  pipeline: *** STUBBED *** camera/vision are fake -- "
-                       "text below is canned, not read from a photo");
-    }
+    Serial.printf("  server  : %s%s\n", SERVER_BASE_URL,
+                  SERVER_READ_PATH);
     log_heap("boot");
 
     buttons_begin();
+    repeat_begin();
     if (!audio_begin()) {
         Serial.println("[boot] audio failed to start -- the device cannot speak");
     }
@@ -285,6 +225,59 @@ void setup() {
                    "B short=describe, B long=repeat\n");
 }
 
+// ── TEMPORARY DIAGNOSTIC -- 17 Sep. REVERT BEFORE SHIPPING. ──────────────
+//
+// The device has gone completely silent: no boot "Ready", no shutter click,
+// no speech -- while the serial log insists it played everything. On 17 Sep
+// the full live path worked end to end against Kristian's real server and
+// reported `[play] ok 39338 samples (1.64s)` with nothing audible.
+//
+// git diff since the last KNOWN-GOOD audio (939135b, 11 Sep) shows audio.cpp,
+// audio.h, phrase.cpp and phrase.h are byte-for-byte unchanged. So this plays
+// the three phrases that DO exist in flash, one after another, with no camera,
+// no Wi-Fi, no server and no capture in the way -- the exact code path that
+// demonstrably made noise six days ago.
+//
+//   heard  -> the speaker, module, wiring and I2S are all fine, and the fault
+//             is in the application path after all (which would contradict
+//             the diff, and is therefore the most informative outcome)
+//   silent -> the fault is below audio_write(), i.e. a signal wire, the
+//             common ground, the speaker, or the module itself
+//
+// B short is Describe in the shipping build. Put it back.
+void handle_audio_selftest() {
+    Serial.println("[test] AUDIO SELF-TEST -- no camera, no wifi, no server");
+    log_heap("selftest start");
+
+    struct Item { PhraseId id; const char *name; };
+    const Item items[] = {
+        {PH_READY,       "ready       (0.50s)"},
+        {PH_NO_TEXT,     "no_text     (1.43s)"},
+        {PH_NO_INTERNET, "no_internet (1.88s)"},
+    };
+
+    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        Serial.printf("[test] %u/3 playing '%s' ...\n",
+                      (unsigned)(i + 1), items[i].name);
+        const uint32_t t0 = millis();
+        phrase_play(items[i].id);
+        audio_drain();
+        Serial.printf("[test]     returned after %lu ms\n",
+                      (unsigned long)(millis() - t0));
+        delay(400);            // a gap, so three phrases are three sounds
+    }
+
+    // Synthesised, not recorded -- so if the phrases are silent but this is
+    // not, the fault is the phrase bank rather than the audio chain.
+    Serial.println("[test] 4/4 shutter earcon (synthesised, 2200 Hz)");
+    earcon_shutter();
+    audio_drain();
+
+    Serial.println("[test] done. Heard NOTHING at all? Then the fault is "
+                   "below audio_write() -- wiring, ground, speaker or module.");
+    log_heap("selftest end");
+}
+
 void loop() {
     const ButtonEvent e = buttons_poll();
     if (e != BTN_NONE) {
@@ -292,7 +285,9 @@ void loop() {
         switch (e) {
             case BTN_A_SHORT: handle(MODE_READ); break;
             case BTN_A_LONG:  handle(MODE_SUMMARISE); break;
-            case BTN_B_SHORT: handle(MODE_DESCRIBE); break;
+            // TEMPORARY 17 Sep: was handle(MODE_DESCRIBE). Audio
+            // self-test while the device is silent. PUT IT BACK.
+            case BTN_B_SHORT: handle_audio_selftest(); break;
             case BTN_B_LONG:  handle_repeat(); break;
             default: break;
         }

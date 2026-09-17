@@ -1,6 +1,7 @@
 #include "reader.h"
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 
 #include "audio.h"
@@ -12,6 +13,13 @@ namespace {
 // the body -- so this is the only buffer left in the file.
 constexpr size_t OUT_SAMPLES = 512;
 int16_t g_out[OUT_SAMPLES];
+
+// The Repeat cache. 30 s at 24 kHz 16-bit mono = 1.44 MB, against ~7 MB of
+// PSRAM free after a QXGA capture. Measured replies run 1.6-17.5 s, so 30 s
+// has real headroom; there is no reason to be clever about the size.
+int16_t *g_cache = nullptr;
+size_t   g_cache_cap = 0;      // samples
+size_t   g_cache_n = 0;        // samples actually held
 
 struct Format {
     uint32_t rate = TTS_SAMPLE_RATE;
@@ -66,7 +74,73 @@ bool parse_wav(const uint8_t *b, size_t len, Format *fmt) {
     return false;
 }
 
+// Push `n` samples from the cache into I2S. Shared by the live read and by
+// Repeat, so both paths are literally the same code -- Repeat is not a second
+// implementation that can drift.
+ReadStats play_samples(const int16_t *pcm, size_t n) {
+    ReadStats st = {};
+    const uint32_t t0 = millis();
+    audio_clear_stop();
+    bool stopped = false;
+    size_t done = 0;
+    uint32_t t_first = 0;
+
+    while (done < n && !stopped) {
+        const size_t take = (n - done) > OUT_SAMPLES ? OUT_SAMPLES : (n - done);
+        if (t_first == 0) {
+            t_first = millis() - t0;
+        }
+        if (!audio_write(pcm + done, take)) {
+            stopped = true;                // button pressed
+        }
+        st.samples += take;
+        done += take;
+    }
+
+    st.ms_to_first_audio = t_first;
+    st.ms_total = millis() - t0;
+    st.ok = (st.samples > 0) && !stopped;
+    return st;
+}
+
 }  // namespace
+
+bool repeat_begin() {
+    g_cache_cap = (size_t)REPEAT_CACHE_SECONDS * TTS_SAMPLE_RATE;
+    g_cache = (int16_t *)heap_caps_malloc(g_cache_cap * sizeof(int16_t),
+                                          MALLOC_CAP_SPIRAM);
+    if (g_cache == nullptr) {
+        // Not fatal. Repeat degrades to "nothing to repeat" for the whole
+        // session and everything else works exactly as before -- but say so
+        // loudly, because it is a silent capability loss otherwise.
+        g_cache_cap = 0;
+        Serial.println("[rpt ] PSRAM alloc FAILED -- Repeat disabled this run");
+        return false;
+    }
+    Serial.printf("[rpt ] cache %u KB in PSRAM (%d s)\n",
+                  (unsigned)(g_cache_cap * sizeof(int16_t) / 1024),
+                  REPEAT_CACHE_SECONDS);
+    return true;
+}
+
+bool   repeat_have()    { return g_cache != nullptr && g_cache_n > 0; }
+size_t repeat_samples() { return g_cache_n; }
+
+void repeat_clear() { g_cache_n = 0; }
+
+ReadStats repeat_play() {
+    ReadStats st = {};
+    if (!repeat_have()) {
+        return st;
+    }
+    Serial.printf("[rpt ] replaying %u samples (%.2fs) from PSRAM -- no "
+                  "network\n", (unsigned)g_cache_n,
+                  g_cache_n / (float)TTS_SAMPLE_RATE);
+    st = play_samples(g_cache, g_cache_n);
+    Serial.printf("[rpt ] %s  %u samples in %u ms\n", st.ok ? "ok " : "STOPPED",
+                  (unsigned)st.samples, (unsigned)st.ms_total);
+    return st;
+}
 
 ReadStats read_aloud(const uint8_t *body, size_t len) {
     ReadStats st = {};
@@ -129,19 +203,33 @@ ReadStats read_aloud(const uint8_t *body, size_t len) {
         return st;
     }
 
-    audio_clear_stop();
-    bool stopped = false;
-    uint32_t t_first = 0;
-    size_t done = 0;
-
-    // The one-byte sample carry is gone, and this is why: it existed only
-    // because TCP reads land on arbitrary boundaries, so a 16-bit sample
+    // Decode into the Repeat cache, then play FROM the cache. One buffer, one
+    // conversion, and the property that makes this worth doing: every
+    // successful read exercises the Repeat path, so Repeat cannot rot
+    // unnoticed the way it did for the last nine days.
+    //
+    // The one-byte sample carry that used to live here is gone. It existed
+    // only because TCP reads land on arbitrary boundaries, so a 16-bit sample
     // could be split across two i2s_write() calls -- the periodic click
-    // 02-SOFTWARE.md 11.4 warns about. The body is one contiguous buffer
-    // now, so there are no boundaries left to straddle.
-    while (done < frames && !stopped) {
+    // 02-SOFTWARE.md 11.4 warns about. The body is one contiguous buffer now,
+    // so there are no boundaries left to straddle.
+    g_cache_n = 0;
+
+    const bool fits = (g_cache != nullptr) && (frames <= g_cache_cap);
+    if (!fits && g_cache != nullptr) {
+        // Longer than the cache. Play it, but do NOT keep a truncated copy:
+        // half a dose is worse than no dose, and Repeat saying the first two
+        // thirds of a label is a confident lie. Repeat will honestly report
+        // nothing cached.
+        Serial.printf("[play] %u frames exceeds the %u-sample cache -- playing "
+                      "uncached, Repeat unavailable for this reading\n",
+                      (unsigned)frames, (unsigned)g_cache_cap);
+    }
+
+    for (size_t done = 0; done < frames; done += OUT_SAMPLES) {
         const size_t n = (frames - done) > OUT_SAMPLES ? OUT_SAMPLES
                                                        : (frames - done);
+        int16_t *dst = fits ? (g_cache + done) : g_out;
         for (size_t i = 0; i < n; i++) {
             const uint8_t *p = pcm + (done + i) * frame_bytes;   // left channel
             if (fmt.is_float) {
@@ -149,29 +237,34 @@ ReadStats read_aloud(const uint8_t *body, size_t len) {
                 memcpy(&f, p, 4);
                 if (f > 1.0f) f = 1.0f;
                 if (f < -1.0f) f = -1.0f;
-                g_out[i] = (int16_t)(f * 32767.0f);
+                dst[i] = (int16_t)(f * 32767.0f);
             } else {
-                g_out[i] = (int16_t)le16(p);
+                dst[i] = (int16_t)le16(p);
             }
         }
-        if (t_first == 0) {
-            t_first = millis() - t0;
+        if (!fits) {
+            // No cache: convert and play chunk by chunk, as before.
+            if (!audio_write(g_out, n)) {
+                st.ms_total = millis() - t0;
+                Serial.println("[play] stopped by button");
+                return st;
+            }
+            st.samples += n;
         }
-        if (!audio_write(g_out, n)) {
-            stopped = true;                    // button pressed
-        }
-        st.samples += n;
-        done += n;
     }
 
-    st.ms_to_first_audio = t_first;
+    if (fits) {
+        g_cache_n = frames;
+        st = play_samples(g_cache, frames);
+    } else {
+        st.ok = (st.samples > 0);
+    }
     st.ms_total = millis() - t0;
-    st.ok = (st.samples > 0) && !stopped;
 
     Serial.printf("[play] %s  %u samples (%.2fs) in %u ms%s\n",
                   st.ok ? "ok " : "INCOMPLETE", (unsigned)st.samples,
                   st.samples / (float)TTS_SAMPLE_RATE,
                   (unsigned)st.ms_total,
-                  stopped ? "  [stopped by button]" : "");
+                  repeat_have() ? "  [cached for Repeat]" : "");
     return st;
 }
