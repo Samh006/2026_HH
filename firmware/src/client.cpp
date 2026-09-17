@@ -11,6 +11,7 @@ std::tuple<int, std::vector<uint8_t>> send_jpeg(const char* server_url, const ui
         throw std::runtime_error("Failed to initialise HTTP connection");
     }
 
+    http.setTimeout(60000); // timeout after a minute
     http.addHeader("Content-Type", "image/jpeg");
 
     int status = http.POST(const_cast<uint8_t*>(jpeg), jpeg_size);
