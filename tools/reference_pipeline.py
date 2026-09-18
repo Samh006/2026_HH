@@ -5,12 +5,14 @@ reference_pipeline.py -- a JPEG on disk becomes a playable WAV.
 This is the ground truth the firmware imitates. If the device disagrees with
 this script, the device is wrong.
 
-    # against the mock, no key needed
-    python tools/reference_pipeline.py photo.jpg --base-url http://127.0.0.1:8080/api/v1
-
-    # against real OpenRouter
     set OPENROUTER_API_KEY=sk-or-v1-...
     python tools/reference_pipeline.py photo.jpg --mode read --out out.wav
+
+This needs a real key now. The mock it used to run against for free is gone
+(D29), and so is the firmware OpenRouter path -- so this script is no longer
+"the audio path to port". What it is still for is PROMPTS: the vision prompt
+here is the one the server has to use, and SERVER_CONTRACT.md points at it as
+the live copy.
 
 The speech leg follows D14, NOT section 4 of the software brief: that section
 describes /audio/speech with response_format: pcm, which does not exist on
@@ -23,7 +25,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import struct
 import sys
 import time
@@ -208,29 +209,21 @@ def auth(key):
     return h
 
 
-CONFIG_H = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "..", "firmware", "src", "config.h")
 
 
 def load_key():
-    """OPENROUTER_API_KEY if set, else read OR_API_KEY out of config.h.
+    """OPENROUTER_API_KEY from the environment. Never print the return value.
 
-    The fallback matters for two reasons: config.h is gitignored and already
-    holds the key for the firmware, so there is one place to update rather than
-    two; and a freshly-set Windows user environment variable is invisible to
-    processes that were already running, which otherwise looks like a missing
-    key. Never print the return value."""
+    This used to fall back to reading OR_API_KEY out of firmware/src/config.h.
+    That macro no longer exists and must not come back: the whole point of the
+    server (D25) is that the device never holds a key. Note that a freshly-set
+    Windows user environment variable is invisible to processes that were
+    already running, which looks exactly like a missing key -- open a new
+    shell before believing this."""
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
         return key, "environment"
-    try:
-        with open(CONFIG_H, encoding="utf-8", errors="replace") as f:
-            m = re.search(r'#define\s+OR_API_KEY\s+"([^"]*)"', f.read())
-    except OSError:
-        return "", "not found"
-    if not m or "REPLACE-ME" in m.group(1):
-        return "", "config.h placeholder"
-    return m.group(1).strip(), "firmware/src/config.h"
+    return "", "not found"
 
 
 def wrap_wav(pcm, rate):
@@ -272,16 +265,14 @@ def main():
     args = ap.parse_args()
 
     key, key_src = load_key()
-    is_mock = "openrouter.ai" not in args.base_url
-    if not key and not is_mock:
-        sys.exit(f"No API key ({key_src}). Set OPENROUTER_API_KEY, or fill in "
-                 "OR_API_KEY in firmware/src/config.h, or point --base-url at "
-                 "the mock server.")
+    if not key:
+        sys.exit(f"No API key ({key_src}). Set OPENROUTER_API_KEY in the "
+                 "environment. There is deliberately no key in config.h any "
+                 "more -- see D25.")
 
-    print(f"\n  backend     : {args.base_url}"
-          f"{'  (mock -- plain HTTP)' if is_mock else '  (real, TLS)'}")
-    if not is_mock:
-        print(f"  key         : {len(key)} chars, from {key_src}")
+    print("")
+    print(f"  backend     : {args.base_url}")
+    print(f"  key         : {len(key)} chars, from {key_src}")
     print(f"  mode        : {args.mode}")
 
     session = requests.Session()

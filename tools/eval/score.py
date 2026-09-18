@@ -2,8 +2,12 @@
 """
 score.py -- run the eval set and print a score.
 
-    python tools/eval/score.py --base-url http://127.0.0.1:8080/api/v1
-    python tools/eval/score.py                     # real OpenRouter
+    set OPENROUTER_API_KEY=sk-or-v1-...
+    python tools/eval/score.py
+
+Needs a real key: the mock this could run against for free is gone (D29).
+Note this scores the OpenRouter API directly, not our server -- it speaks
+/chat/completions and returns text, where the server returns audio.
 
 Run it on every prompt change. IF THE SCORE DOES NOT MOVE, DO NOT SHIP THE
 CHANGE (02-SOFTWARE.md section 5).
