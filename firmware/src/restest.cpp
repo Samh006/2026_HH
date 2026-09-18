@@ -4,9 +4,11 @@
 //
 // A bench experiment, not shipping firmware. Point the device at a printed
 // label, press button A, and it captures the SAME scene at SVGA, UXGA and
-// QXGA back to back, uploads each to the mock's /mock/upload, and prints
-// bytes and milliseconds for each. Then you look at the three files in
-// tools/captures/ and decide with your eyes.
+// QXGA back to back and prints bytes and milliseconds for each.
+//
+// It used to POST every frame to the mock's /mock/upload, which is how the
+// files in tools/captures/ got there. The mock is gone (D29), so this now
+// measures sizes and timings only -- the numbers, not the pictures.
 //
 // WHY THIS EXISTS
 //
@@ -42,7 +44,6 @@
 //    first size measured looks worse than it is and the ordering of the test
 //    becomes the result.
 #include <Arduino.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
 #include <esp_camera.h>
 
@@ -91,7 +92,7 @@ bool wifi_up() {
         }
         delay(200);
     }
-    Serial.println("[wifi] failed -- captures will not be uploaded");
+    Serial.println("[wifi] failed -- sizes and timings still measure fine");
     return false;
 }
 
@@ -127,25 +128,6 @@ bool camera_up() {
     Serial.printf("[cam ] up at QXGA, psram_free=%u\n",
                   (unsigned)ESP.getFreePsram());
     return true;
-}
-
-void upload(const uint8_t *jpeg, size_t len, const char *tag) {
-    if (WiFi.status() != WL_CONNECTED) {
-        return;
-    }
-    char url[192];
-    snprintf(url, sizeof(url), "%s/mock/upload?tag=%s", SERVER_BASE_URL, tag);
-    WiFiClient client;
-    HTTPClient http;
-    if (!http.begin(client, url)) {
-        Serial.println("       upload: http.begin failed");
-        return;
-    }
-    http.addHeader("Content-Type", "image/jpeg");
-    http.setTimeout(SERVER_TIMEOUT_MS);
-    const int code = http.POST(const_cast<uint8_t *>(jpeg), len);
-    Serial.printf("       upload -> HTTP %d\n", code);
-    http.end();
 }
 
 void run_sweep() {
@@ -184,7 +166,6 @@ void run_sweep() {
         Serial.printf("[%-4s] %-9s %6u bytes  %4lu ms  psram_free=%u\n",
                       st.name, st.dims, (unsigned)len, (unsigned long)ms,
                       (unsigned)ESP.getFreePsram());
-        upload(jpeg, len, st.name);
         free(jpeg);            // camera_grab_sharpest returns a copy we own
     }
 
