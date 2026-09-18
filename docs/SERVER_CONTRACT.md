@@ -5,7 +5,8 @@ this. Everything the device requires is on this page, and every claim here
 points at the line that enforces it.
 
 Written 8 Sep 2026. If this page and the firmware ever disagree,
-[`firmware/src/reader.cpp`](../firmware/src/reader.cpp) wins — tell Sam and
+[`firmware/src/client.cpp`](../firmware/src/client.cpp) (the request) and
+[`firmware/src/reader.cpp`](../firmware/src/reader.cpp) (the reply) win — tell Sam and
 this page gets fixed.
 
 ---
@@ -16,7 +17,8 @@ Five lines, so the rest makes sense.
 
 1. Someone with vision impairment points the device at a medicine label and
    presses a button. They **cannot see the result and cannot check it.**
-2. The camera captures a JPEG to PSRAM. ~27 KB, SVGA, ~136 ms. Working.
+2. The camera captures a JPEG to PSRAM. **~140 KB, QXGA, ~554 ms** — SVGA
+   lost the small print entirely, so we moved up (D28). Working.
 3. It POSTs that JPEG to **your server** and expects **audio** back.
 4. It streams the audio straight into the I²S DAC as it arrives, and speaks it.
 5. If anything fails, it plays a short pre-recorded phrase instead. It must
@@ -40,18 +42,21 @@ Content-Type: image/jpeg
 ```
 
 - **Raw bytes in the body.** Not multipart, not base64, not JSON.
-- Typically **20–35 KB**. Allow up to ~200 KB.
+- **79–94 KB** on real labels, measured on the device 18 Sep; D28 saw 137 KB on
+  a larger, busier scene. Frame size is scene-dependent — allow up to ~200 KB
+  and do not code to any single figure. The old number here was 20–35 KB, from
+  the SVGA days.
 - No auth header. Plain HTTP on the LAN, no TLS — deliberate, see D25.
 - The device waits **30 s** before giving up
   (`SERVER_TIMEOUT_MS`). Vision + TTS inside that is the whole budget.
 
-Enforced at [`reader.cpp:137-142`](../firmware/src/reader.cpp#L137).
+Enforced at [`client.cpp`](../firmware/src/client.cpp) — `http.setTimeout(SERVER_TIMEOUT_MS)`.
 
 ### Only one endpoint exists, and it means "read"
 
 All three modes currently POST to the same path — `config.h` sets
 `SERVER_READ_PATH`, `SERVER_SUMMARISE_PATH` and `SERVER_DESCRIBE_PATH` to
-`/api/tts/fromimage`, and [`reader.cpp:29`](../firmware/src/reader.cpp#L29)
+`/api/tts/fromimage`, and [`client.cpp`](../firmware/src/client.cpp)
 just picks between those constants.
 
 **So right now the server has no way to tell which mode was pressed.** That is
@@ -69,7 +74,7 @@ send different paths. Don't build for it now.
 
 The device is deliberately tolerant here, because your server was being written
 in parallel with the firmware. It sniffs the body at
-[`reader.cpp:58`](../firmware/src/reader.cpp#L58):
+[`reader.cpp`](../firmware/src/reader.cpp), in `read_aloud()`:
 
 | You send | Works? |
 |---|---|
@@ -89,7 +94,7 @@ These are not tolerated, and one of them fails silently.
 
 | Requirement | What happens otherwise |
 |---|---|
-| **24000 Hz** | There is no resampler on the device. It logs a warning and plays the speech at the wrong speed. [`reader.cpp:161`](../firmware/src/reader.cpp#L161) |
+| **24000 Hz** | There is no resampler on the device. It logs a warning and plays the speech at the wrong speed. [`reader.cpp`](../firmware/src/reader.cpp) |
 | **Mono, 1 channel** | ⚠️ **Silent failure.** `fmt.channels` is parsed but never used to de-interleave, so a stereo body plays as noise at double rate with no error anywhere. |
 
 So: **24 kHz, mono.** 16-bit signed is the natural choice.
@@ -103,7 +108,7 @@ fine; it does not require a `Content-Length`.
 The device never sees your text. On a non-200 it plays a phrase and skips the
 audio entirely, so **the status code you pick is the error message the user
 hears.** Mapping is at
-[`main.cpp:130`](../firmware/src/main.cpp#L130):
+[`main.cpp`](../firmware/src/main.cpp), in `phrase_for_status()`:
 
 | You return | User hears |
 |---|---|
@@ -152,7 +157,7 @@ to trust.
 
 - **`NOTEXT`** — if the model returns exactly this, return **422** and no
   audio. Don't send "NOTEXT" to TTS; it costs money and sounds like a fault.
-- **`UNCLEAR` and `[?]`** — [`main.cpp:105`](../firmware/src/main.cpp#L105)
+- **`UNCLEAR` and `[?]`** — [`main.cpp`](../firmware/src/main.cpp)
   scans the text for these literal strings and plays a warning before the
   reading. **If you reword the prompt so the model stops emitting those exact
   tokens, the safety warning silently stops working.**
@@ -171,10 +176,9 @@ The file map, since it is spread out.
 |---|---|
 | **The prompts** | [`tools/reference_pipeline.py:44`](../tools/reference_pipeline.py#L44) — `PROMPTS` |
 | **A working end-to-end reference in Python** | [`tools/reference_pipeline.py`](../tools/reference_pipeline.py) — this is ground truth. If the device disagrees with this script, the device is wrong |
-| **The client side of this contract** | [`firmware/src/reader.cpp`](../firmware/src/reader.cpp) — `read_aloud()` |
-| **The status→phrase mapping** | [`firmware/src/main.cpp:130`](../firmware/src/main.cpp#L130) — `phrase_for_status()` |
-| **The mock server** | [`tools/mock_server.py`](../tools/mock_server.py) — speaks the *old* OpenRouter shape, not yours |
-| **The conformance suite** | [`tools/test_mock.py`](../tools/test_mock.py) — 21 assertions |
+| **The client side of this contract** | [`firmware/src/client.cpp`](../firmware/src/client.cpp) — `send_jpeg()` sends and downloads; [`reader.cpp`](../firmware/src/reader.cpp) — `read_aloud()` plays |
+| **The status→phrase mapping** | [`firmware/src/main.cpp`](../firmware/src/main.cpp) — `phrase_for_status()` |
+| **The vision prompt to use** | [`tools/reference_pipeline.py`](../tools/reference_pipeline.py) — `PROMPTS["read"]`, the live copy |
 | **Why anything is the way it is** | [`docs/decisions.md`](decisions.md) — D14, D15, D17, D25 are the ones that concern you |
 | **Where things stand today** | [`docs/TODAY.md`](TODAY.md) |
 | **Your repo** | `github.com/Frosk-Kristian/HH-2026-WebServer` |
@@ -278,11 +282,46 @@ noise means it is probably stereo.
 
 ## 8. Your four changes, re-scoped
 
+**Re-checked against the live server on 18 Sep 2026**, from a second machine
+on the same LAN (`192.168.6.22:5148`), with `curl` and real photos. Three of
+the four are done.
+
 | # | Change | Verdict |
 |---|---|---|
-| 1 | **Use the real prompt** from `PROMPTS["read"]` | 🔴 **Do it.** Without it there is no `NOTEXT` and no `UNCLEAR`, so the safety warning cannot fire |
-| 2 | **Bind `--urls http://0.0.0.0:5148`** | 🔴 **Do it.** Nothing works at all without this |
-| 3 | **Real status codes** — 422 for no text, 502/503 for upstream failure | 🔴 **Do it.** This is the device's entire error vocabulary |
-| 4 | ~~Return raw int16 PCM instead of a WAV~~ | 🟢 **Not needed.** The device already handles WAV. Just make sure it is **24 kHz mono** |
+| 1 | **Use the real prompt** from `PROMPTS["read"]` | 🟡 **Partly, unverified.** `NOTEXT` clearly works — a photo of a ceiling vent returned 422 "No text found." But nothing we sent produced an `UNCLEAR`, so whether the safety half of the prompt is in place is **still unknown**. It needs a deliberately degraded label to test |
+| 2 | **Bind `--urls http://0.0.0.0:5148`** | 🟢 **Done.** Reachable from another machine, so it is not on localhost |
+| 3 | **Real status codes** — 422 for no text, 502/503 for upstream failure | 🟢 **Done** for 200 and 422. 502/503 not exercised — we have no way to make the upstream fail on demand |
+| 4 | ~~Return raw int16 PCM instead of a WAV~~ | 🟢 **Not needed, and confirmed correct.** Returns `audio/wav`, **1 channel, 24000 Hz, 16-bit** — exactly what §3 asks for |
 
-Three of four, and one of them is a command-line flag.
+Measured round trips, JPEG in to last audio byte out:
+
+| Image | Result | Time | Body |
+|---|---|---|---|
+| ceiling, no text | 422 | 10.2 s | 14 B |
+| printed box, small text | 200 | 3.9 s | 124 KB (2.6 s of speech) |
+| dense text | 200 | 9.9 s | 585 KB (12.2 s of speech) |
+
+And from the device itself, same day, three real presses:
+
+| Image | Result | Time | Body |
+|---|---|---|---|
+| label, no legible text | 422 | 3.2 s | 0 B |
+| label | 200 | 5.3 s | 79 KB (1.6 s of speech) |
+| dense label | 200 | **16.6 s** | 609 KB (12.7 s of speech) |
+
+**16.6 s is the number to look at.** The device is silent for all of it and the
+user gets no feedback, so a long reading currently feels like a failure. If the
+server could stream the audio as it synthesises, or send the first sentence
+early, that is the single biggest improvement available to this device — bigger
+than anything left on our side.
+
+Two things for you in those numbers:
+
+- **10.2 s to answer 422** is the worst case, because the device is silent for
+  all of it and then says "I could not find any text". If the vision result is
+  `NOTEXT` you already know before synthesis — answering immediately would make
+  the commonest mis-aim much less confusing to hold.
+- **585 KB** was the reason the device used to fail on long readings: it was
+  buffering the reply in internal RAM, of which there is ~250 KB. Fixed on our
+  side (it lands in PSRAM now), and the device caps a reply at 1.44 MB — 30 s of
+  audio. Anything longer is truncated, so please keep readings under that.
