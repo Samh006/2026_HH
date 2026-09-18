@@ -65,15 +65,26 @@ ButtonEvent update(Button &b, uint32_t now) {
 }  // namespace
 
 void buttons_begin() {
+    const uint32_t now = millis();
     for (size_t i = 0; i < N_BUTTONS; i++) {
         pinMode(g_buttons[i].pin, INPUT_PULLUP);
         g_buttons[i].raw_down = (digitalRead(g_buttons[i].pin) == LOW);
         g_buttons[i].stable_down = g_buttons[i].raw_down;
-        g_buttons[i].changed_at = millis();
+        g_buttons[i].changed_at = now;
+        // Seed BOTH of these, and treat a pin that is already down as a press
+        // we have already reported. They used to be left at 0/false, so a pin
+        // reading LOW at boot -- held, miswired, or shorted -- was seeded
+        // stable_down = true with pressed_at = 0, and update() then evaluated
+        // `now - 0 >= BTN_LONGPRESS_MS` and emitted a LONG PRESS about 740 ms
+        // into boot with nobody touching the device. main.cpp's swallow loop
+        // then waited for a release that was never coming.
+        g_buttons[i].pressed_at = now;
+        g_buttons[i].long_fired = g_buttons[i].raw_down;
     }
-    // GPIO 15 is a strapping pin. Held LOW at boot it only silences the ROM
-    // boot log -- harmless -- but if the board will not boot with the button
-    // wired, that is the first thing to suspect. (01-HARDWARE.md section 2)
+    // Buttons are GPIO 47 and 21 on this board (D20/D27). Neither is a
+    // strapping pin, so a held button cannot stop it booting -- but 0, 45 and
+    // 46 are, and hardware/wiring.md lists them as off limits for exactly
+    // that reason.
 }
 
 ButtonEvent buttons_poll() {
