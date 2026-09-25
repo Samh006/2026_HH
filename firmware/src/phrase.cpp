@@ -72,6 +72,37 @@ const Entry g_phrases[PH_COUNT] = {
 #else
     NO_ENTRY("uncertain"),
 #endif
+// Order below must match phrase.h exactly -- this is a positional list.
+#ifdef HAVE_PHRASE_NO_CONNECTION
+    ENTRY(NO_CONNECTION, "no_connection"),
+#else
+    NO_ENTRY("no_connection"),
+#endif
+#ifdef HAVE_PHRASE_SERVER_ERROR
+    ENTRY(SERVER_ERROR, "server_error"),
+#else
+    NO_ENTRY("server_error"),
+#endif
+#ifdef HAVE_PHRASE_NO_AUDIO
+    ENTRY(NO_AUDIO, "no_audio"),
+#else
+    NO_ENTRY("no_audio"),
+#endif
+#ifdef HAVE_PHRASE_OUT_OF_FOCUS
+    ENTRY(OUT_OF_FOCUS, "out_of_focus"),
+#else
+    NO_ENTRY("out_of_focus"),
+#endif
+#ifdef HAVE_PHRASE_UNHANDLED_ERROR
+    ENTRY(UNHANDLED_ERROR, "unhandled_error"),
+#else
+    NO_ENTRY("unhandled_error"),
+#endif
+#ifdef HAVE_PHRASE_NO_STORED_AUDIO
+    ENTRY(NO_STORED_AUDIO, "no_stored_audio"),
+#else
+    NO_ENTRY("no_stored_audio"),
+#endif
 };
 
 // Earcons are built on the fly into this buffer. 100 ms at 24 kHz is 2400
@@ -97,6 +128,13 @@ void tone(float freq_hz, uint32_t ms, float gain) {
 }
 
 }  // namespace
+
+bool phrase_available(PhraseId id) {
+    if (id >= PH_COUNT) {
+        return false;
+    }
+    return g_phrases[id].pcm != nullptr && g_phrases[id].len > 0;
+}
 
 bool phrase_play(PhraseId id) {
     if (id >= PH_COUNT) {

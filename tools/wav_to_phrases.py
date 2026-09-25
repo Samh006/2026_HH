@@ -35,6 +35,18 @@ NAME_MAP = {
     "error":       "ERROR",
     "uncertain":   "UNCERTAIN",
     "repeating":   "REPEATING",
+    # Recorded 25 Sep. A specific error vocabulary, replacing the single
+    # catch-all "error": a user who hears the same sound for "your Wi-Fi is
+    # down" and "the label is blurry" has learned nothing, and on this device
+    # the sound is their only feedback channel.
+    "no_connection":   "NO_CONNECTION",
+    "server_error":    "SERVER_ERROR",
+    "no_audio":        "NO_AUDIO",
+    "out_of_focus":    "OUT_OF_FOCUS",
+    "unhandled_error": "UNHANDLED_ERROR",
+    # B pressed before anything has been read. Not an error -- the device is
+    # working exactly as designed -- so it must not sound like one.
+    "no_stored_audio": "NO_STORED_AUDIO",
 }
 
 

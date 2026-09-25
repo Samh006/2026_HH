@@ -144,13 +144,18 @@ void wifi_scan_report() {
 // Negative values are HTTPClient transport errors, not server responses.
 PhraseId phrase_for_status(int status) {
     if (status <= 0) {
-        return PH_NO_INTERNET;      // never reached the server at all
+        // Transport failure, and wifi_connect() succeeded moments ago -- so
+        // this is the reader, not the network: laptop asleep, crashed, on a
+        // different network, or SERVER_BASE_URL gone stale on a new DHCP
+        // lease. This used to say "no internet", which blamed a network that
+        // was working and sent us hunting the wrong fault on 8 Sep.
+        return PH_SERVER_ERROR;
     }
     switch (status) {
-        case 422: return PH_NO_TEXT;      // read fine, nothing legible in it
+        case 422: return PH_NO_TEXT;         // photo fine, nothing legible in it
         case 502:
-        case 503: return PH_NO_INTERNET;  // server could not reach OpenRouter
-        default:  return PH_ERROR;
+        case 503: return PH_SERVER_ERROR;    // reader could not reach its model
+        default:  return PH_UNHANDLED_ERROR;
     }
     // NOTE: uncertainty (D17) is deliberately NOT a status code here. A
     // non-200 makes this path play a phrase and skip the audio entirely --
@@ -170,7 +175,7 @@ void handle(Mode mode) {
 
     if (!wifi_connect()) {
         earcon_error();
-        phrase_play(PH_NO_INTERNET);
+        phrase_play(PH_NO_CONNECTION);
         g_state = ST_IDLE;
         return;
     }
@@ -182,7 +187,7 @@ void handle(Mode mode) {
     if (!camera_capture(&jpeg, &jpeg_len)) {
         Serial.println("[stm ] capture failed");
         earcon_error();
-        phrase_play(PH_ERROR);
+        phrase_play(PH_UNHANDLED_ERROR);
         g_state = ST_IDLE;
         return;
     }
@@ -236,7 +241,7 @@ void handle(Mode mode) {
         Serial.println("[stm ] HTTP 200 with an empty body");
         g_repeat_len = 0;
         earcon_error();
-        phrase_play(PH_ERROR);
+        phrase_play(PH_NO_AUDIO);
     } else {
         // The audio is already sitting in the replay cache -- it was
         // downloaded straight into it, so Repeat needs no copy.
@@ -244,9 +249,13 @@ void handle(Mode mode) {
         g_state = ST_SPEAKING;
         const ReadStats rs = read_aloud(g_repeat, g_repeat_len);
         if (!rs.ok && rs.samples == 0) {
+            // 200 with a body we could not turn into a single sample: wrong
+            // sample rate, wrong bit depth, or not audio at all. Same thing
+            // from the user's side as an empty body -- the reader answered and
+            // there was nothing to listen to.
             Serial.println("[stm ] HTTP 200 but nothing played");
             earcon_error();
-            phrase_play(PH_ERROR);
+            phrase_play(PH_NO_AUDIO);
         }
     }
     audio_drain();
@@ -258,8 +267,18 @@ void handle(Mode mode) {
 // still works, which is the whole point of it.
 void handle_repeat() {
     if (g_repeat == nullptr || g_repeat_len == 0) {
+        // Nothing has been read yet. This is not an error -- the device is
+        // behaving exactly as designed -- so it must not sound like one.
+        //
+        // It used to play no_text ("Nothing found. Try moving closer."), which
+        // is worse than useless: nothing was ever read, so moving closer and
+        // pressing again changes nothing, and the device has told a user who
+        // cannot see it to take a pointless action. Falls back to the blunt
+        // error only while no_stored_audio.wav is still being recorded, and
+        // upgrades itself the moment that file lands -- no code change.
         Serial.println("[stm ] repeat with nothing cached");
-        phrase_play(PH_NO_TEXT);
+        phrase_play(phrase_available(PH_NO_STORED_AUDIO) ? PH_NO_STORED_AUDIO
+                                                         : PH_UNHANDLED_ERROR);
         g_state = ST_IDLE;
         return;
     }
