@@ -18,7 +18,6 @@ struct Button {
     bool raw_down;               // last raw sample
     uint32_t changed_at;         // when raw last flipped
     uint32_t pressed_at;         // when stable_down became true
-    bool long_fired;             // long event already emitted this press
 };
 
 Button g_buttons[] = {
@@ -42,24 +41,28 @@ ButtonEvent update(Button &b, uint32_t now) {
         return BTN_NONE;                        // still bouncing
     }
     if (raw == b.stable_down) {
-        // Steady. The only thing that can happen is crossing into a long press.
-        if (b.stable_down && !b.long_fired &&
-            now - b.pressed_at >= BTN_LONGPRESS_MS) {
-            b.long_fired = true;
-            return b.long_evt;                  // fire while still held
-        }
-        return BTN_NONE;
+        return BTN_NONE;                        // steady, nothing to report
     }
 
     // Debounced edge.
     b.stable_down = raw;
     if (raw) {
         b.pressed_at = now;
-        b.long_fired = false;
-        return BTN_NONE;                        // classify on release
+        return BTN_NONE;                        // everything is decided on release
     }
-    // Released. If the long event already went out, swallow the release.
-    return b.long_fired ? BTN_NONE : b.short_evt;
+
+    // Released, and this is the ONLY place an event is emitted. The long event
+    // used to fire the moment the press crossed BTN_LONGPRESS_MS, while the
+    // finger was still down -- and audio.cpp aborts playback whenever
+    // buttons_any_down() is true, so a long press silenced its own
+    // acknowledgement. Worse, the release was then swallowed, so holding
+    // button B did nothing at all: the event fired into a muted speaker and
+    // nothing else ever came.
+    //
+    // Deciding here costs the user nothing -- they find out what they did when
+    // they let go, which is a few hundred milliseconds later -- and it makes
+    // "B, however you press it" expressible at all.
+    return (now - b.pressed_at >= BTN_LONGPRESS_MS) ? b.long_evt : b.short_evt;
 }
 
 }  // namespace
@@ -71,15 +74,13 @@ void buttons_begin() {
         g_buttons[i].raw_down = (digitalRead(g_buttons[i].pin) == LOW);
         g_buttons[i].stable_down = g_buttons[i].raw_down;
         g_buttons[i].changed_at = now;
-        // Seed BOTH of these, and treat a pin that is already down as a press
-        // we have already reported. They used to be left at 0/false, so a pin
-        // reading LOW at boot -- held, miswired, or shorted -- was seeded
-        // stable_down = true with pressed_at = 0, and update() then evaluated
-        // `now - 0 >= BTN_LONGPRESS_MS` and emitted a LONG PRESS about 740 ms
-        // into boot with nobody touching the device. main.cpp's swallow loop
-        // then waited for a release that was never coming.
+        // Seed this, do not leave it at 0. A pin reading LOW at boot -- held,
+        // miswired, or shorted -- is seeded stable_down = true, and an
+        // unseeded pressed_at of 0 would make the release edge compute a hold
+        // time of however long the device has been running, i.e. always a long
+        // press. Seeded, a button genuinely held through boot is simply
+        // reported when it is let go.
         g_buttons[i].pressed_at = now;
-        g_buttons[i].long_fired = g_buttons[i].raw_down;
     }
     // Buttons are GPIO 47 and 21 on this board (D20/D27). Neither is a
     // strapping pin, so a held button cannot stop it booting -- but 0, 45 and
@@ -110,8 +111,8 @@ bool buttons_any_down() {
 const char *button_event_name(ButtonEvent e) {
     switch (e) {
         case BTN_A_SHORT: return "A short  -> READ";
-        case BTN_A_LONG:  return "A long   -> SUMMARISE";
-        case BTN_B_SHORT: return "B short  -> DESCRIBE";
+        case BTN_A_LONG:  return "A long   -> (unassigned)";
+        case BTN_B_SHORT: return "B short  -> REPEAT";
         case BTN_B_LONG:  return "B long   -> REPEAT";
         default:          return "none";
     }

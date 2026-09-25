@@ -317,8 +317,7 @@ void setup() {
 #endif
 
     phrase_play(PH_READY);
-    Serial.println("\nready -- A short=read, A long=summarise, "
-                   "B short=describe, B long=repeat\n");
+    Serial.println("\nready -- A = read a label, B = say it again\n");
 }
 
 void loop() {
@@ -326,10 +325,29 @@ void loop() {
     if (e != BTN_NONE) {
         Serial.printf("\n[btn ] %s\n", button_event_name(e));
         switch (e) {
-            case BTN_A_SHORT: handle(MODE_READ); break;
-            case BTN_A_LONG:  handle(MODE_SUMMARISE); break;
-            case BTN_B_SHORT: handle(MODE_DESCRIBE); break;
-            case BTN_B_LONG:  handle_repeat(); break;
+            case BTN_A_SHORT:
+                handle(MODE_READ);
+                break;
+
+            // Deliberately unassigned. A long used to run MODE_SUMMARISE and
+            // B short MODE_DESCRIBE, but all three modes POST the same
+            // endpoint and the server cannot tell them apart
+            // (SERVER_CONTRACT.md, "One endpoint only") -- so three of the
+            // four gestures did exactly the same thing, each costing an API
+            // call and a ~17 s wait. An accidental long hold is easy for
+            // someone with a tremor, and our users are the least able to
+            // notice they made one.
+            case BTN_A_LONG:
+                Serial.println("[btn ] A long is unassigned -- nothing to do");
+                break;
+
+            // B replays, however it is pressed. Nobody holding a button for a
+            // second should have to discover it means something else.
+            case BTN_B_SHORT:
+            case BTN_B_LONG:
+                handle_repeat();
+                break;
+
             default: break;
         }
         // Swallow the press that stopped playback so it does not immediately
